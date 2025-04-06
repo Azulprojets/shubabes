@@ -19,7 +19,7 @@ $scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining
 # URLs for downloading files
 $miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
 # Note: If this URL becomes invalid, check https://system.data.sqlite.org for the latest version and update accordingly.
-$sqliteDllUrl = "https://system.data.sqlite.org/blobs/1.0.119.0/sqlite-netFx20-binary-bundle-x64-2005-1.0.119.0.zip"
+$sqliteDllUrl = "https://system.data.sqlite.org/blobs/1.0.119.0/sqlite-netFx46-binary-bundle-x64-2015-1.0.119.0.zip"
 
 # Add a flag for CPU mining (set based on your setup)
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired

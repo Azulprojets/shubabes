@@ -17,7 +17,7 @@ $scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining
 # URLs for downloading files
 $miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
 $sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"  # SQLite tools ZIP
-$liteDbDllUrl = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/23315232/93111d64-8696-4102-b08e-0a59bf454dcc?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=releaseassetproduction%2F20250406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250406T102613Z&X-Amz-Expires=300&X-Amz-Signature=f530488f568592eb50b3740fc6ca0c8ee6e3466108170b09a9b1c6b5b36bf9d1&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3DLiteDB.5.0.20.nupkg&response-content-type=application%2Foctet-stream"  # Corrected to .nupkg
+$liteDbDllUrl = "https://codeload.github.com/litedb-org/LiteDB/zip/refs/tags/v5.0.20"  # Corrected to .nupkg
 
 # Add a flag for CPU mining (set based on your setup)
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired

